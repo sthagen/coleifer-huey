@@ -23,6 +23,7 @@ from huey.exceptions import TaskLockedException
 from huey.registry import Registry
 from huey.serializer import Serializer
 from huey.storage import BlackHoleStorage
+from huey.storage import FileStorage
 from huey.storage import MemoryStorage
 from huey.storage import PriorityRedisExpireStorage
 from huey.storage import PriorityRedisStorage
@@ -114,6 +115,7 @@ class Huey(object):
         self._pre_execute = OrderedDict()
         self._post_execute = OrderedDict()
         self._startup = OrderedDict()
+        self._shutdown = OrderedDict()
         self._registry = Registry()
         self._signal = S.Signal()
 
@@ -238,6 +240,18 @@ class Huey(object):
             # Assume we were given the function itself.
             name = name.__name__
         return self._startup.pop(name, None) is not None
+
+    def on_shutdown(self, name=None):
+        def decorator(fn):
+            self._shutdown[name or fn.__name__] = fn
+            return fn
+        return decorator
+
+    def unregister_on_shutdown(self, name=None):
+        if not isinstance(name, string_type):
+            # Assume we were given the function itself.
+            name = name.__name__
+        return self._shutdown.pop(name, None) is not None
 
     def signal(self, *signals):
         def decorator(fn):
@@ -373,7 +387,9 @@ class Huey(object):
                 self.put_result(task.id, Error({
                     'error': repr(exception),
                     'retries': task.retries,
-                    'traceback': tb}))
+                    'traceback': tb,
+                    'task_id': task.id,
+                }))
             elif task_value is not None or self.store_none:
                 self.put_result(task.id, task_value)
 
@@ -613,7 +629,7 @@ class Task(object):
         if self.on_complete:
             rep += ' -> %s' % self.on_complete
         if self.on_error:
-            rep += ', on error %s' % self.on_complete
+            rep += ', on error %s' % self.on_error
         return rep
 
     def create_id(self):
@@ -637,14 +653,24 @@ class Task(object):
         if self.on_complete:
             self.on_complete.then(task, *args, **kwargs)
         else:
-            self.on_complete = task.s(*args, **kwargs)
+            if isinstance(task, Task):
+                if args: task.extend_data(args)
+                if kwargs: task.extend_data(kwargs)
+            else:
+                task = task.s(*args, **kwargs)
+            self.on_complete = task
         return self
 
     def error(self, task, *args, **kwargs):
         if self.on_error:
             self.on_error.error(task, *args, **kwargs)
         else:
-            self.on_error = task.s(*args, **kwargs)
+            if isinstance(task, Task):
+                if args: task.extend_data(args)
+                if kwargs: task.extend_data(kwargs)
+            else:
+                task = task.s(*args, **kwargs)
+            self.on_error = task
         return self
 
     def execute(self):
@@ -1027,3 +1053,6 @@ class PriorityRedisHuey(Huey):
 
 class PriorityRedisExpireHuey(Huey):
     storage_class = PriorityRedisExpireStorage
+
+class FileHuey(Huey):
+    storage_class = FileStorage

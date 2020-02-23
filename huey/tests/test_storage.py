@@ -3,7 +3,12 @@ import hashlib
 import itertools
 import os
 import shutil
+import threading
 import unittest
+try:
+    from queue import Queue
+except ImportError:
+    from Queue import Queue
 
 from redis.connection import ConnectionPool
 from redis import Redis
@@ -17,10 +22,11 @@ from huey.api import SqliteHuey
 from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import ConfigurationError
-from huey.storage import FileStorageMethods
+from huey.storage import FileStorage
 from huey.storage import MemoryStorage
 from huey.storage import RedisExpireStorage
 from huey.tests.base import BaseTestCase
+from huey.tests.base import TRAVIS
 
 
 class StorageTests(object):
@@ -274,11 +280,10 @@ class TestSqliteStorage(StorageTests, BaseTestCase):
         self.assertEqual(curs.fetchone(), (3000,))
 
 
-class MemFileStorage(FileStorageMethods, MemoryStorage): pass
-
-
 class TestFileStorageMethods(StorageTests, BaseTestCase):
     path = '/tmp/test-huey-storage'
+    result_path = '/tmp/test-huey-storage/results'
+    queue_path = '/tmp/test-huey-storage/queue'
 
     def tearDown(self):
         super(TestFileStorageMethods, self).tearDown()
@@ -286,7 +291,7 @@ class TestFileStorageMethods(StorageTests, BaseTestCase):
             shutil.rmtree(self.path)
 
     def get_huey(self):
-        return Huey('test-file-storage', storage_class=MemFileStorage,
+        return Huey('test-file-storage', storage_class=FileStorage,
                     path=self.path, levels=2)
 
     def test_filesystem_result_store(self):
@@ -296,8 +301,9 @@ class TestFileStorageMethods(StorageTests, BaseTestCase):
         keys = (b'k1', b'k2', b'kx')
         for key in keys:
             checksum = hashlib.md5(key).hexdigest()
+            b0, b1 = checksum[0], checksum[1]
             # Default is to use two levels.
-            key_path = os.path.join(self.path, checksum[0], checksum[1])
+            key_path = os.path.join(self.result_path, b0, b1)
             key_filename = os.path.join(key_path, checksum)
 
             self.assertFalse(os.path.exists(key_filename))
@@ -313,5 +319,56 @@ class TestFileStorageMethods(StorageTests, BaseTestCase):
 
         # Flushing the results blows away everything.
         s.flush_results()
-        self.assertTrue(os.path.exists(self.path))
-        self.assertEqual(os.listdir(self.path), [])
+        self.assertTrue(os.path.exists(self.result_path))
+        self.assertEqual(os.listdir(self.result_path), [])
+
+    @unittest.skipIf(TRAVIS, 'skipping test that is flaky on travis-ci')
+    def test_fs_multithreaded(self):
+        def create_tasks(t, n, q):
+            for i in range(n):
+                message = str((t * n) + i)
+                self.huey.storage.enqueue(message.encode('utf8'))
+                q.put(message)
+
+        def dequeue_tasks(q):
+            while True:
+                data = self.huey.storage.dequeue()
+                if data is None:
+                    break
+                q.put(data.decode('utf8'))
+
+        nthreads = 10
+        ntasks = 50
+        in_q = Queue()
+        threads = []
+        for i in range(nthreads):
+            t = threading.Thread(target=create_tasks, args=(i, ntasks, in_q))
+            t.daemon = True
+            threads.append(t)
+
+        for t in threads: t.start()
+        for t in threads: t.join(timeout=10.)
+
+        self.assertEqual(self.huey.pending_count(), nthreads * ntasks)
+
+        out_q = Queue()
+        threads = []
+        for i in range(nthreads):
+            t = threading.Thread(target=dequeue_tasks, args=(out_q,))
+            t.daemon = True
+            threads.append(t)
+
+        for t in threads: t.start()
+        for t in threads: t.join(timeout=10.)
+
+        self.assertEqual(out_q.qsize(), nthreads * ntasks)
+        self.assertEqual(self.huey.pending_count(), 0)
+
+        # Ensure that the order in which tasks were enqueued is the order in
+        # which they are dequeued.
+        for i in range(nthreads * ntasks):
+            self.assertEqual(in_q.get(), out_q.get())
+
+    @unittest.skipIf(TRAVIS, 'skipping test that is flaky on travis-ci')
+    def test_consumer_integration(self):
+        return super(TestFileStorageMethods, self).test_consumer_integration()

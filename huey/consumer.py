@@ -64,6 +64,12 @@ class BaseProcess(object):
         """
         raise NotImplementedError
 
+    def shutdown(self):
+        """
+        Called when process has finished running (e.g., when shutting down).
+        """
+        pass
+
 
 class Worker(BaseProcess):
     """
@@ -87,6 +93,14 @@ class Worker(BaseProcess):
                 startup_hook()
             except Exception as exc:
                 self._logger.exception('startup hook "%s" failed', name)
+
+    def shutdown(self):
+        for name, shutdown_hook in self.huey._shutdown.items():
+            self._logger.debug('calling shutdown hook "%s"', name)
+            try:
+                shutdown_hook()
+            except Exception as exc:
+                self._logger.exception('shutdown hook "%s" failed', name)
 
     def loop(self, now=None):
         task = None
@@ -188,7 +202,7 @@ class ThreadEnvironment(Environment):
         return t
 
     def is_alive(self, proc):
-        return proc.isAlive()
+        return proc.is_alive()
 
 
 class GreenletEnvironment(Environment):
@@ -342,6 +356,8 @@ class Consumer(object):
                 pass
             except:
                 self._logger.exception('Process %s died!', name)
+            finally:
+                process.shutdown()
         return self.environment.create_process(_run, name)
 
     def start(self):

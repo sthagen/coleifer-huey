@@ -110,6 +110,24 @@ Huey types
     Huey that uses in-memory storage. Only should be used when testing or when
     using ``immediate`` mode. MemoryHuey fully supports task priorities.
 
+.. py:class:: FileHuey
+
+    Huey that uses the file-system for storage. Should not be used in
+    high-throughput, highly-concurrent environments, as the
+    :py:class:`FileStorage` utilizes exclusive locks around all file-system
+    operations.
+
+    :param str path: base-path for huey data (queue tasks, schedule and results
+        will be stored in sub-directories of this path).
+    :param int levels: number of levels in result-file directory structure to
+        ensure the results directory does not contain an unmanageable number of
+        files.
+    :param bool use_thread_lock: use the standard lib ``threading.Lock``
+        instead of a lockfile for file-system operations. This should only be
+        enabled when using the greenlet or thread consumer worker models.
+
+    FileHuey fully supports task priorities.
+
 
 Huey object
 -----------
@@ -570,6 +588,27 @@ Huey object
         :returns: boolean
 
         Unregister the specified on-startup hook.
+
+    .. py:method:: on_shutdown(name=None)
+
+        :param name: (optional) name for the hook.
+        :returns: a decorator used to wrap the actual on-shutdown function.
+
+        Register a shutdown hook. The callback will be executed by a worker
+        immediately before it goes offline. Uncaught exceptions will be logged
+        but will have no other effect on the overall shutdown of the worker.
+
+        The callback function must not accept any parameters.
+
+        This API is provided to simplify cleaning-up shared resources.
+
+    .. py:method:: unregister_on_shutdown(name_or_fn)
+
+        :param name_or_fn: the name given to the on-shutdown hook, or the
+            function object itself.
+        :returns: boolean
+
+        Unregister the specified on-shutdown hook.
 
     .. py:method:: signal(*signals)
 
@@ -1283,7 +1322,7 @@ Exceptions
 
     Raised when Huey encounters a configuration problem.
 
-.. py:class:: TaskLockdException
+.. py:class:: TaskLockedException
 
     Raised by the consumer when a task lock cannot be acquired.
 
@@ -1377,7 +1416,7 @@ Huey comes with several built-in storage implementations:
         connection constructor.
 
 
-.. py:class:: FileStorageMethods(name, path, levels=2, **storage_kwargs)
+.. py:class:: FileStorage(name, path, levels=2, use_thread_lock=False)
 
     :param str name: (unused by the file storage API)
     :param str path: directory path used to store task results. Will be created
@@ -1385,34 +1424,15 @@ Huey comes with several built-in storage implementations:
     :param int levels: number of levels in cache-file directory structure to
         ensure a given directory does not contain an unmanageable number of
         files.
-    :param storage_kwargs: Additional keyword arguments for the parent storage.
+    :param bool use_thread_lock: use the standard lib ``threading.Lock``
+        instead of a lockfile. Note: this should only be enabled when using the
+        greenlet or thread consumer worker models.
 
-    Unlike the other storage implementations described, the
-    :py:class:`FileStorageMethods` class is intended to be used as a mixin
-    alongside another storage engine. This class implements the result store
-    APIs (put, peek, pop), which are used for task result storage among other
-    things.
-
-    Example of using Redis for the queue and the file-system for the result
-    store:
-
-    .. code-block:: python
-
-        from huey import Huey
-        from huey.storage import FileStorageMethods, RedisStorage
-
-
-        # Use the file-system for result storage, Redis for everything else.
-        class RedisFileStorage(FileStorageMethods, RedisStorage):
-            pass
-
-        huey = Huey(
-            'my-app',
-            storage_class=RedisFileStorage,
-            path='/var/lib/my-app/huey-results/',  # File storage params.
-            levels=2,
-            url='redis://localhost:6379/15',  # Redis storage params.
-            client_name='my-app-huey')
+    The :py:class:`FileStorage` implements a simple file-system storage layer.
+    This storage class should not be used in high-throughput, highly-concurrent
+    environments, as it utilizes exclusive locks around all file-system
+    operations. This is done to prevent race-conditions when reading from the
+    file-system.
 
 
 .. py:class:: MemoryStorage()
