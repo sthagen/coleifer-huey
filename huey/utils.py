@@ -146,9 +146,9 @@ class FileLock(object):
 
     def release(self):
         if self.fd is not None:
-            os.close(self.fd)
+            fd, self.fd = self.fd, None
+            os.close(fd)
             os.unlink(self.filename)
-            self.fd = None
 
     def __enter__(self):
         self.acquire()
@@ -156,3 +156,9 @@ class FileLock(object):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.release()
+
+
+if sys.version_info[0] < 3:
+    time_clock = time.time
+else:
+    time_clock = time.monotonic
