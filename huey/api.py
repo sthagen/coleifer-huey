@@ -31,6 +31,7 @@ from huey.storage import RedisExpireStorage
 from huey.storage import RedisStorage
 from huey.storage import SqliteStorage
 from huey.utils import Error
+from huey.utils import normalize_expire_time
 from huey.utils import normalize_time
 from huey.utils import reraise_as
 from huey.utils import string_type
@@ -160,21 +161,23 @@ class Huey(object):
         return Consumer(self, **options)
 
     def task(self, retries=0, retry_delay=0, priority=None, context=False,
-             name=None, **kwargs):
+             name=None, expires=None, **kwargs):
         def decorator(func):
             return TaskWrapper(
                 self,
                 func.func if isinstance(func, TaskWrapper) else func,
-                retries=retries,
-                retry_delay=retry_delay,
-                default_priority=priority,
                 context=context,
                 name=name,
+                default_retries=retries,
+                default_retry_delay=retry_delay,
+                default_priority=priority,
+                default_expires=expires,
                 **kwargs)
         return decorator
 
     def periodic_task(self, validate_datetime, retries=0, retry_delay=0,
-                      priority=None, context=False, name=None, **kwargs):
+                      priority=None, context=False, name=None, expires=None,
+                      **kwargs):
         def decorator(func):
             def method_validate(self, timestamp):
                 return validate_datetime(timestamp)
@@ -187,6 +190,7 @@ class Huey(object):
                 default_retries=retries,
                 default_retry_delay=retry_delay,
                 default_priority=priority,
+                default_expires=expires,
                 validate_datetime=method_validate,
                 task_base=PeriodicTask,
                 **kwargs)
@@ -284,6 +288,10 @@ class Huey(object):
         return self._registry.create_task(message)
 
     def enqueue(self, task):
+        # Resolve the expiration time when the task is enqueued.
+        if task.expires:
+            task.resolve_expires(self.utc)
+
         if self._immediate:
             self.execute(task)
         else:
@@ -344,6 +352,9 @@ class Huey(object):
         elif self.is_revoked(task, timestamp, False):
             logger.warning('Task %s was revoked, not executing', task)
             self._emit(S.SIGNAL_REVOKED, task)
+        elif task.expires_resolved and task.expires_resolved < timestamp:
+            logger.info('Task %s expired, not executing.', task)
+            self._emit(S.SIGNAL_EXPIRED, task)
         else:
             logger.info('Executing %s', task)
             self._emit(S.SIGNAL_EXECUTING, task)
@@ -606,13 +617,14 @@ class Huey(object):
 
 
 class Task(object):
+    default_expires = None
     default_priority = None
     default_retries = 0
     default_retry_delay = 0
 
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
-                 retry_delay=None, priority=None, on_complete=None,
-                 on_error=None):
+                 retry_delay=None, priority=None, expires=None,
+                 on_complete=None, on_error=None, expires_resolved=None):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -624,6 +636,8 @@ class Task(object):
                 self.default_retry_delay
         self.priority = priority if priority is not None else \
                 self.default_priority
+        self.expires = expires if expires is not None else self.default_expires
+        self.expires_resolved = expires_resolved
 
         self.on_complete = on_complete
         self.on_error = on_error
@@ -636,6 +650,11 @@ class Task(object):
         rep = '%s.%s: %s' % (self.__module__, self.name, self.id)
         if self.eta:
             rep += ' @%s' % self.eta
+        if self.expires:
+            if self.expires_resolved and self.expires != self.expires_resolved:
+                rep += ' exp=%s (%s)' % (self.expires, self.expires_resolved)
+            else:
+                rep += ' exp=%s' % self.expires
         if self.priority:
             rep += ' p=%s' % self.priority
         if self.retries:
@@ -651,6 +670,11 @@ class Task(object):
 
     def create_id(self):
         return str(uuid.uuid4())
+
+    def resolve_expires(self, utc=True):
+        if self.expires:
+            self.expires_resolved = normalize_expire_time(self.expires, utc)
+        return self.expires_resolved
 
     def extend_data(self, data):
         if data is None or data == ():
@@ -761,7 +785,8 @@ class TaskWrapper(object):
         return self.huey.restore_all(self.task_class)
 
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
-                 priority=None, id=None):
+                 priority=None, retries=None, retry_delay=None, expires=None,
+                 id=None):
         if eta is None and delay is None:
             if isinstance(args, (int, float)):
                 delay = args
@@ -782,9 +807,10 @@ class TaskWrapper(object):
             kwargs or {},
             id=id,
             eta=eta,
-            retries=self.retries,
-            retry_delay=self.retry_delay,
-            priority=priority)
+            retries=retries,
+            retry_delay=retry_delay,
+            priority=priority,
+            expires=expires)
         return self.huey.enqueue(task)
 
     def _apply(self, it):
@@ -800,9 +826,11 @@ class TaskWrapper(object):
         return self.func(*args, **kwargs)
 
     def s(self, *args, **kwargs):
-        return self.task_class(args, kwargs, retries=self.retries,
-                               retry_delay=self.retry_delay,
-                               priority=kwargs.pop('priority', None))
+        return self.task_class(args, kwargs,
+                               retries=kwargs.pop('retries', None),
+                               retry_delay=kwargs.pop('retry_delay', None),
+                               priority=kwargs.pop('priority', None),
+                               expires=kwargs.pop('expires', None))
 
 
 class TaskLock(object):
@@ -924,7 +952,7 @@ class Result(object):
     def restore(self):
         return self.huey.restore(self.task)
 
-    def reschedule(self, eta=None, delay=None):
+    def reschedule(self, eta=None, delay=None, expires=None):
         # Rescheduling works by revoking the currently-scheduled task (nothing
         # is done to check if the task has already run, however). Then the
         # original task's data is used to enqueue a new task with a new task ID
@@ -937,7 +965,8 @@ class Result(object):
             self.task.kwargs,
             eta=eta,
             retries=self.task.retries,
-            retry_delay=self.task.retry_delay)
+            retry_delay=self.task.retry_delay,
+            expires=expires if expires is not None else self.task.expires)
         return self.huey.enqueue(task)
 
     def reset(self):
@@ -964,7 +993,7 @@ dash_re = re.compile(r'(\d+)-(\d+)')
 every_re = re.compile(r'\*\/(\d+)')
 
 
-def crontab(minute='*', hour='*', day='*', month='*', day_of_week='*'):
+def crontab(minute='*', hour='*', day='*', month='*', day_of_week='*', strict=False):
     """
     Convert a "crontab"-style set of parameters into a test function that will
     return True when the given datetime matches the parameters set forth in
@@ -977,6 +1006,10 @@ def crontab(minute='*', hour='*', day='*', month='*', day_of_week='*'):
     */n = run every "n" times, i.e. hours='*/4' == 0, 4, 8, 12, 16, 20
     m-n = run every time m..n
     m,n = run on m and n
+
+    The strict parameter will cause crontab to raise a ValueError if an input
+    does not match a supported crontab input format. This provides backwards
+    compatibility.
     """
     validation = (
         ('m', month, range(1, 13)),
@@ -1005,27 +1038,32 @@ def crontab(minute='*', hour='*', day='*', month='*', day_of_week='*'):
                 elif date_str == 'w':
                     piece %= 7
                 settings.add(piece)
+                continue
 
-            else:
-                dash_match = dash_re.match(piece)
-                if dash_match:
-                    lhs, rhs = map(int, dash_match.groups())
-                    if lhs not in acceptable or rhs not in acceptable:
-                        raise ValueError('%s is not a valid input' % piece)
-                    elif date_str == 'w':
-                        lhs %= 7
-                        rhs %= 7
-                    settings.update(range(lhs, rhs + 1))
-                    continue
+            dash_match = dash_re.match(piece)
+            if dash_match:
+                lhs, rhs = map(int, dash_match.groups())
+                if lhs not in acceptable or rhs not in acceptable:
+                    raise ValueError('%s is not a valid input' % piece)
+                elif date_str == 'w':
+                    lhs %= 7
+                    rhs %= 7
+                settings.update(range(lhs, rhs + 1))
+                continue
 
-                # Handle stuff like */3, */6.
-                every_match = every_re.match(piece)
-                if every_match:
-                    if date_str == 'w':
-                        raise ValueError('Cannot perform this kind of matching'
-                                         ' on day-of-week.')
-                    interval = int(every_match.groups()[0])
-                    settings.update(acceptable[::interval])
+            # Handle stuff like */3, */6.
+            every_match = every_re.match(piece)
+            if every_match:
+                if date_str == 'w':
+                    raise ValueError('Cannot perform this kind of matching'
+                                     ' on day-of-week.')
+                interval = int(every_match.groups()[0])
+                settings.update(acceptable[::interval])
+                continue
+
+            # Older versions of Huey would, at this point, ignore the unmatched piece.
+            if strict:
+                raise ValueError('%s is not a valid input' % piece)
 
         cron_settings.append(sorted(list(settings)))
 
