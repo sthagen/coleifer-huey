@@ -48,7 +48,7 @@ def default_queue_name():
         return settings.DATABASE_NAME
     except AttributeError:
         try:
-            return settings.DATABASES['default']['NAME']
+            return str(settings.DATABASES['default']['NAME'])
         except KeyError:
             return 'huey'
 
@@ -129,6 +129,8 @@ def close_db(fn):
     """Decorator to be used with tasks that may operate on the database."""
     @wraps(fn)
     def inner(*args, **kwargs):
+        if not HUEY.immediate:
+            close_old_connections()
         try:
             return fn(*args, **kwargs)
         finally:
