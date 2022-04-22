@@ -41,6 +41,7 @@ from huey.utils import to_timestamp
 
 
 logger = logging.getLogger('huey')
+_sentinel = object()
 
 
 class Huey(object):
@@ -388,6 +389,16 @@ class Huey(object):
             logger.info('Task %s raised RetryTask, retrying.', task.id)
             task.retries += 1
             exception = exc
+        except CancelExecution as exc:
+            if exc.retry or (exc.retry is None and task.retries):
+                task.retries = max(task.retries, 1)
+                msg = '(task will be retried)'
+            else:
+                task.retries = 0
+                msg = '(aborted, will not be retried)'
+            logger.warning('Task %s raised CancelExecution %s.', task.id, msg)
+            self._emit(S.SIGNAL_CANCELED, task)
+            exception = exc
         except KeyboardInterrupt:
             logger.warning('Received exit signal, %s did not finish.', task.id)
             self._emit(S.SIGNAL_INTERRUPTED, task)
@@ -444,7 +455,8 @@ class Huey(object):
             try:
                 callback(task)
             except CancelExecution:
-                logger.warning('Task %s cancelled by %s.', task, name)
+                logger.warning('Task %s cancelled by %s (pre-execute).',
+                               task, name)
                 raise
             except Exception:
                 logger.exception('Unhandled exception calling pre-execute '
@@ -597,6 +609,9 @@ class Huey(object):
 
     def lock_task(self, lock_name):
         return TaskLock(self, lock_name)
+
+    def is_locked(self, lock_name):
+        return TaskLock(self, lock_name).is_locked()
 
     def flush_locks(self, *names):
         flushed = set()
@@ -851,6 +866,9 @@ class TaskLock(object):
         self._name = name
         self._key = '%s.lock.%s' % (self._huey.name, self._name)
         self._huey._locks.add(self._key)
+
+    def is_locked(self):
+        return self._huey.storage.has_data_for_key(self._key)
 
     def __call__(self, fn):
         @wraps(fn)
