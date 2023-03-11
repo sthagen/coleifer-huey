@@ -859,7 +859,15 @@ class TaskWrapper(object):
         return self.func(*args, **kwargs)
 
     def s(self, *args, **kwargs):
+        eta = kwargs.pop('eta', None)
+        delay = kwargs.pop('delay', None)
+        if delay is not None and isinstance(delay, datetime.timedelta):
+            delay = delay.total_seconds()
+        if eta is not None or delay is not None:
+            eta = normalize_time(eta, delay, self.huey.utc)
+
         return self.task_class(args, kwargs,
+                               eta=eta,
                                retries=kwargs.pop('retries', None),
                                retry_delay=kwargs.pop('retry_delay', None),
                                priority=kwargs.pop('priority', None),
@@ -988,7 +996,8 @@ class Result(object):
     def restore(self):
         return self.huey.restore(self.task)
 
-    def reschedule(self, eta=None, delay=None, expires=None):
+    def reschedule(self, eta=None, delay=None, expires=None, priority=None,
+                   preserve_pipeline=True):
         # Rescheduling works by revoking the currently-scheduled task (nothing
         # is done to check if the task has already run, however). Then the
         # original task's data is used to enqueue a new task with a new task ID
@@ -996,13 +1005,22 @@ class Result(object):
         self.revoke()
         if eta is not None or delay is not None:
             eta = normalize_time(eta, delay, self.huey.utc)
+        if preserve_pipeline:
+            on_complete = self.task.on_complete
+            on_error = self.task.on_error
+        else:
+            on_complete = on_error = None
+
         task = type(self.task)(
             self.task.args,
             self.task.kwargs,
             eta=eta,
             retries=self.task.retries,
             retry_delay=self.task.retry_delay,
-            expires=expires if expires is not None else self.task.expires)
+            priority=priority if priority is not None else self.task.priority,
+            expires=expires if expires is not None else self.task.expires,
+            on_complete=on_complete,
+            on_error=on_error)
         return self.huey.enqueue(task)
 
     def reset(self):
