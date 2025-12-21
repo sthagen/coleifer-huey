@@ -19,6 +19,10 @@ setup(
     author='Charles Leifer',
     author_email='coleifer@gmail.com',
     url='http://github.com/coleifer/huey/',
+    project_urls={
+        'Documentation': 'https://huey.readthedocs.io',
+        'Changelog': 'https://github.com/coleifer/huey/blob/master/CHANGELOG.md',
+    },
     packages=find_packages(),
     extras_require=extras_require,
     package_data={
@@ -41,7 +45,8 @@ setup(
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
-        #'Programming Language :: Python :: 3.13',
+        'Programming Language :: Python :: 3.13',
+        'Programming Language :: Python :: 3.14',
         'Topic :: Software Development :: Libraries :: Python Modules',
     ],
     test_suite='runtests.collect_tests',
