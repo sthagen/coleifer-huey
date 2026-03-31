@@ -1,8 +1,11 @@
 from collections import namedtuple
 import calendar
+import contextlib
 import datetime
 import errno
+import logging
 import os
+import signal
 import sys
 import time
 import warnings
@@ -10,6 +13,17 @@ try:
     import fcntl
 except ImportError:
     fcntl = None
+
+try:
+    import gevent
+except ImportError:
+    gevent = None
+
+from huey.exceptions import TaskTimeout
+
+
+logger = logging.getLogger(__name__)
+
 
 if sys.version_info < (3, 12):
     utcnow = datetime.datetime.utcnow
@@ -42,11 +56,6 @@ def load_class(s):
     __import__(path)
     mod = sys.modules[path]
     return getattr(mod, klass)
-
-
-def reraise_as(new_exc_class):
-    exc_class, exc, tb = sys.exc_info()
-    raise new_exc_class('%s: %s' % (exc_class.__name__, exc))
 
 
 def is_naive(dt):
@@ -112,34 +121,22 @@ def normalize_time(eta=None, delay=None, utc=True):
         return eta
 
 
-if sys.version_info[0] == 2:
-    string_type = basestring
-    text_type = unicode
-    def to_timestamp(dt):
-        return time.mktime(dt.timetuple())
-else:
-    string_type = (bytes, str)
-    text_type = str
-    def to_timestamp(dt):
-        return dt.timestamp()
-
-
 def encode(s):
     if isinstance(s, bytes):
         return s
-    elif isinstance(s, text_type):
+    elif isinstance(s, str):
         return s.encode('utf8')
     elif s is not None:
-        return text_type(s).encode('utf8')
+        return str(s).encode('utf8')
 
 
 def decode(s):
-    if isinstance(s, text_type):
+    if isinstance(s, str):
         return s
     elif isinstance(s, bytes):
         return s.decode('utf8')
     elif s is not None:
-        return text_type(s)
+        return str(s)
 
 
 class FileLock(object):
@@ -177,7 +174,36 @@ class FileLock(object):
         self.release()
 
 
-if sys.version_info[0] < 3:
-    time_clock = time.time
-else:
-    time_clock = time.monotonic
+@contextlib.contextmanager
+def noop_context():
+    yield
+
+@contextlib.contextmanager
+def process_timeout(seconds):
+    def _handle_alrm(signum, frame):
+        raise TaskTimeout('timeout (%ss)' % seconds)
+
+    orig = signal.signal(signal.SIGALRM, _handle_alrm)
+    signal.alarm(int(seconds))
+    try:
+        yield
+    finally:
+        signal.alarm(0)  # Cancel any pending alarm.
+        signal.signal(signal.SIGALRM, orig)
+
+@contextlib.contextmanager
+def thread_timeout(seconds):
+    yield
+
+@contextlib.contextmanager
+def greenlet_timeout(seconds):
+    if gevent is None:
+        logger.warning('gevent is required for greenlet-worker timeout')
+        yield
+
+    timer = gevent.Timeout(seconds, TaskTimeout('timeout (%ss)' % seconds))
+    timer.start()
+    try:
+        yield
+    finally:
+        timer.cancel()

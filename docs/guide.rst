@@ -534,6 +534,91 @@ Expiration times can also be specified when scheduling tasks:
         eta=one_hr,
         expires=one_hr + timedelta(seconds=60))
 
+Task timeouts
+-------------
+
+Huey tasks can be interrupted by setting a ``timeout`` on the task, in seconds.
+The actual implementation of the timeout mechanism depends on which worker type
+you are using in the consumer, and is selected automatically by Huey:
+
+* Process: uses ``SIGALRM``, most robust.
+* Thread: threads do **NOT** support a hard timeout. In order to use timeouts
+  with threaded workers, it is necessary to do cooperative timeout-checking
+  from within your task function, described below.
+* Greenlet: uses ``gevent.Timeout``, reliable so long as the task yields to the
+  event loop and is not held-up making a blocking call.
+
+A default timeout can be provided when declaring a task:
+
+.. code-block:: python
+
+    # Task must finish executing in 60s. If not, a `TaskTimeout` is raised and
+    # returned to the caller via the result handle.
+    @huey.task(timeout=60)
+    def maybe_slow(...):
+
+Timeouts can be specified per-invocation, as well:
+
+.. code-block:: python
+
+    # Task will raise a `TaskTimeout` if runs for more than 30s.
+    maybe_slow(report_file, timeout=30)
+
+Timeouts can also be specified when scheduling tasks:
+
+.. code-block:: python
+
+    maybe_slow.schedule(
+        args=(report_file,),
+        timeout=120)
+
+When a task times-out, the ``SIGNAL_TIMEOUT`` :ref:`signal <signals>` will be
+fired.
+
+.. _cooperative-timeout:
+
+Cooperative Timeout
+^^^^^^^^^^^^^^^^^^^
+
+Threads do not support a hard timeout, so in order to implement timeouts when
+using threaded workers **or** if you prefer more control within your task
+function, you can use the cooperative timeout APIs:
+
+* :py:meth:`Task.check_timeout`
+* :py:prop:`Task.is_timed_out`
+* :py:prop:`Task.time_remaining`
+
+These methods require that the :py:class:`Task` instance be passed as context
+into the task function with ``context=True``.
+
+Example:
+
+.. code-block:: python
+
+   @huey.task(timeout=60, context=True)  # 60s deadline, takes Task as context.
+   def process_report(data, task=None):
+       for batch in chunk(data, 100):
+           task.check_timeout()  # Will trigger a TaskTimeout if exceeds 60s.
+           service.process_data(batch)  # Some expensive/slow operation.
+
+For budget-aware scheduling you can use the more granular ``time_remaining``:
+
+.. code-block:: python
+
+   @huey.task(timeout=60, context=True)  # 60s deadline, takes Task as context.
+   def process_accounts(accounts, task=None):
+       for i, account in enumerate(accounts):
+           # If it looks like we might run out of time, schedule the remaining
+           # accounts to run in 5 minutes.
+           if task.time_remaining < 10:
+               process_accounts.schedule(
+                   args=(accounts[i:],),
+                   delay=300)
+               return
+
+           service.process_single_account(account)
+
+
 Task pipelines
 --------------
 

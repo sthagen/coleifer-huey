@@ -1,5 +1,6 @@
 import datetime
 import inspect
+import time
 
 from huey.api import MemoryHuey
 from huey.api import PeriodicTask
@@ -15,6 +16,7 @@ from huey.exceptions import ResultTimeout
 from huey.exceptions import RetryTask
 from huey.exceptions import TaskException
 from huey.exceptions import TaskLockedException
+from huey.exceptions import TaskTimeout
 from huey.serializer import SignedSerializer
 from huey.tests.base import BaseTestCase
 
@@ -623,6 +625,118 @@ class TestQueue(BaseTestCase):
         self.assertTrue(self.huey.execute(task) is None)
 
         self.assertEqual(state, [res2.id])
+
+    def test_timeout(self):
+        state = []
+
+        @self.huey.task(context=True)
+        def normal(task=None):
+            state.append(task.timeout)
+
+        @self.huey.task(context=True, timeout=1)
+        def timeout(task=None):
+            state.append(task.timeout)
+
+        def assertTimeout(expected):
+            task = self.huey.dequeue()
+            self.assertEqual(task.timeout, expected)
+            self.huey.execute(task)
+            self.assertEqual(state, [expected])
+            state.clear()
+
+        # Test behavior across APIs w/a task that has no timeout.
+        normal()
+        assertTimeout(None)
+
+        normal(timeout=None)
+        assertTimeout(None)
+
+        normal(timeout=0)
+        assertTimeout(0)  # Zero treated as no timeout.
+
+        normal(timeout=2)
+        assertTimeout(2)
+
+        t = normal.s(timeout=3)
+        self.huey.enqueue(t)
+        assertTimeout(3)
+
+        normal.schedule(delay=-1)
+        assertTimeout(None)
+
+        normal.schedule(delay=-1, timeout=4)
+        assertTimeout(4)
+
+        # Test behavior across APIs w/a task that has default_timeout.
+        timeout()
+        assertTimeout(1)
+
+        timeout(timeout=2)
+        assertTimeout(2)
+
+        timeout(timeout=None)
+        assertTimeout(1)
+
+        timeout(timeout=0)
+        assertTimeout(0)
+
+        t = timeout.s(timeout=3)
+        self.huey.enqueue(t)
+        assertTimeout(3)
+
+        timeout.schedule(delay=-1)
+        assertTimeout(1)
+
+        timeout.schedule(delay=-1, timeout=4)
+        assertTimeout(4)
+
+    def test_timeout_coop_helpers(self):
+        @self.huey.task(context=True)
+        def normal(task=None):
+            pass
+
+        @self.huey.task(context=True, timeout=1)
+        def timeout(task=None):
+            pass
+
+        t = normal.s()
+        self.assertFalse(t.is_timed_out)
+        self.assertEqual(t.time_remaining, float('inf'))
+        t.check_timeout()  # No exc.
+
+        t = timeout.s()
+        t._deadline = time.monotonic() + 1
+        self.assertFalse(t.is_timed_out)
+        self.assertTrue(0 < t.time_remaining <= 1)
+        t.check_timeout()  # No exc.
+
+        t._deadline = time.monotonic() - 1
+        self.assertTrue(t.is_timed_out)
+        self.assertEqual(t.time_remaining, 0)
+        with self.assertRaises(TaskTimeout):
+            t.check_timeout()
+
+    def test_timeout_cooperative_full(self):
+        state = []
+
+        @self.huey.task(timeout=0.001, context=True)
+        def timeout(n, task=None):
+            time.sleep(0.002)
+            task.check_timeout()
+            state.append(n)
+            return n
+
+        r = timeout(1)
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(state, [])
+
+        self.assertEqual(self.huey.result_count(), 1)
+        exc = self.trap_exception(r)
+        self.assertTrue('timeout' in str(exc).lower())
+
+        r = timeout(1, timeout=1000)
+        self.assertEqual(self.execute_next(), 1)
+        self.assertEqual(state, [1])
 
     def test_task_error(self):
         @self.huey.task()

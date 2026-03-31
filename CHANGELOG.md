@@ -3,6 +3,13 @@ Changelog
 
 ## master
 
+* Add `timeout` (using SIGALRM for process and gevent.Timeout for greenlet) to
+  control task running time. For threads, unfortunately, there's no good
+  mechanism so instead APIs for cooperatively checking timeout are provided on
+  the Task instance.
+* Remove Python 2.x compatibility.
+* Add new `incr(key, amount=1)` to storage API for atomic increment primitive.
+
 [View commits](https://github.com/coleifer/huey/compare/2.6.0...HEAD)
 
 ## 2.6.0

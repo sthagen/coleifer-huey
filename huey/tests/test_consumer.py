@@ -5,8 +5,10 @@ from huey.api import crontab
 from huey.consumer import Consumer
 from huey.consumer import Scheduler
 from huey.consumer_options import ConsumerConfig
+from huey.exceptions import TaskException
+from huey.exceptions import TaskTimeout
 from huey.tests.base import BaseTestCase
-from huey.utils import time_clock
+from huey.tests.base import slow_test
 
 
 class TestConsumer(Consumer):
@@ -36,9 +38,32 @@ class TestConsumerIntegration(BaseTestCase):
 
     def schedule_tasks(self, consumer, now=None):
         scheduler = consumer._create_scheduler()
-        scheduler._next_loop = time_clock() + 60
-        scheduler._next_periodic = time_clock() - 60
+        scheduler._next_loop = time.monotonic() + 60
+        scheduler._next_periodic = time.monotonic() - 60
         scheduler.loop(now)
+
+    @slow_test()
+    def test_consumer_timeout(self):
+        @self.huey.task(timeout=0.1, context=True)
+        def t(n, task=None):
+            if n:
+                for _ in range(100):
+                    task.check_timeout()
+                    time.sleep(n / 100)
+            return n
+
+        r1 = t(0)
+        r2 = t(0.2)
+        consumer = self.consumer(workers=1)
+        self.work_on_tasks(consumer, 2)
+        self.assertEqual(r1.get(), 0)
+        with self.assertRaises(TaskException):
+            r2.get()
+        try:
+            r2.get()
+        except TaskException as exc:
+            self.assertEqual(exc.metadata['error'],
+                             'TaskTimeout(\'timeout 0.1s\')')
 
     def test_consumer_schedule_task(self):
         @self.huey.task()

@@ -22,7 +22,9 @@ from huey.constants import WORKER_PROCESS
 from huey.constants import WORKER_THREAD
 from huey.constants import WORKER_TYPES
 from huey.exceptions import ConfigurationError
-from huey.utils import time_clock
+from huey.utils import greenlet_timeout
+from huey.utils import process_timeout
+from huey.utils import thread_timeout
 
 
 class ConsumerStopped(Exception): pass
@@ -50,13 +52,13 @@ class BaseProcess(object):
         if the current timestamp is 1340, we'll only sleep for 7 seconds (the
         goal being to sleep until 1347, or 1337 + 10).
         """
-        sleep_time = nseconds - (time_clock() - start_ts)
+        sleep_time = nseconds - (time.monotonic() - start_ts)
         if sleep_time <= 0:
             return
         self._logger.debug('Sleeping for %s', sleep_time)
         # Recompute time to sleep to improve accuracy in case the process was
         # pre-empted by the kernel while logging.
-        sleep_time = nseconds - (time_clock() - start_ts)
+        sleep_time = nseconds - (time.monotonic() - start_ts)
         if sleep_time > 0:
             time.sleep(sleep_time)
 
@@ -150,13 +152,13 @@ class Scheduler(BaseProcess):
         self.interval = max(min(interval, 60), 1)
 
         self.periodic = periodic
-        self._next_loop = time_clock()
-        self._next_periodic = time_clock()
+        self._next_loop = time.monotonic()
+        self._next_periodic = time.monotonic()
 
     def loop(self, now=None):
         current = self._next_loop
         self._next_loop += self.interval
-        if self._next_loop < time_clock():
+        if self._next_loop < time.monotonic():
             self._logger.debug('scheduler skipping iteration to avoid race.')
             return
 
@@ -169,7 +171,7 @@ class Scheduler(BaseProcess):
                 self._logger.debug('Enqueueing %s', task)
                 self.huey.enqueue(task)
 
-        if self.periodic and self._next_periodic <= time_clock():
+        if self.periodic and self._next_periodic <= time.monotonic():
             self._next_periodic += self.periodic_task_seconds
             self.enqueue_periodic_tasks(now)
 
@@ -208,6 +210,9 @@ class ThreadEnvironment(Environment):
     def is_alive(self, proc):
         return proc.is_alive()
 
+    def set_timeout_handler(self, huey):
+        huey.set_timeout_handler(thread_timeout)
+
 
 class GreenletEnvironment(Environment):
     def get_stop_flag(self):
@@ -223,6 +228,9 @@ class GreenletEnvironment(Environment):
     def is_alive(self, proc):
         return not proc.dead
 
+    def set_timeout_handler(self, huey):
+        huey.set_timeout_handler(greenlet_timeout)
+
 
 class ProcessEnvironment(Environment):
     def get_stop_flag(self):
@@ -235,6 +243,9 @@ class ProcessEnvironment(Environment):
 
     def is_alive(self, proc):
         return proc.is_alive()
+
+    def set_timeout_handler(self, huey):
+        huey.set_timeout_handler(process_timeout)
 
 
 WORKER_TO_ENVIRONMENT = {
@@ -291,6 +302,9 @@ class Consumer(object):
 
         # Create the execution environment helper.
         self.environment = self.get_environment(self.worker_type)
+
+        # Install environment-specific timeout handler.
+        self.environment.set_timeout_handler(self.huey)
 
         # Create the event used to signal the process should terminate. We'll
         # also store a boolean flag to indicate whether we should restart after
@@ -435,7 +449,7 @@ class Consumer(object):
         Run the consumer.
         """
         self.start()
-        health_check_ts = time_clock()
+        health_check_ts = time.monotonic()
 
         while True:
             try:
@@ -474,7 +488,7 @@ class Consumer(object):
             raise ConsumerStopped
 
         if self._health_check and health_check_ts:
-            now = time_clock()
+            now = time.monotonic()
             if now >= health_check_ts + self._health_check_interval:
                 health_check_ts = now
                 self.check_worker_health()
