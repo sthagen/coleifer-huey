@@ -342,40 +342,46 @@ class Huey(object):
         size = len(chord_obj.tasks)
         results = []
         for i, task in enumerate(chord_obj.tasks):
-            if isinstance(task, chord):
-                # Nested chord - the nested chord's callback becomes the outer
-                # chord task at position i.
-                task.callback.chord_config = ChordConfig(
-                    cid,
-                    size,
-                    i,
-                    chord_obj.callback)
-                inner_result = self._enqueue_chord(task)
-                results.append(inner_result.callback)
-            elif isinstance(task, group):
+            if isinstance(task, group):
                 raise ValueError('cannot use `group` as a chord member - '
                                  'use .then() to convert to a `chord` first.')
-            else:
-                # Only set chord config on final step in pipeline.
-                curr = task
-                while curr.on_complete is not None:
-                    curr = curr.on_complete
-                curr.chord_config = ChordConfig(cid, size, i, chord_obj.callback)
-                results.append(self.enqueue(task))
 
-        callback_result = Result(self, chord_obj.callback)
+            config = ChordConfig(cid, size, i, chord_obj.callback)
+            results.append(self._enqueue_chord_member(task, config))
 
-        # Aggregate pipeline handles as well.
-        pipeline = None
-        if chord_obj.callback.on_complete:
-            current = chord_obj.callback.on_complete
-            results = [callback_result]
-            while current is not None:
-                results.append(Result(self, current))
-                current = current.on_complete
-            pipeline = ResultGroup(results)
+        cb_result = Result(self, chord_obj.callback)
+        pipeline = self._build_pipeline_results(chord_obj.callback, cb_result)
+        return ChordResult(results, cb_result, pipeline)
 
-        return ChordResult(results, callback_result, pipeline)
+    def _enqueue_chord_member(self, task, config):
+        if isinstance(task, chord):
+            head = task.callback
+        else:
+            head = task
+
+        tail = head
+        while tail.on_complete is not None:
+            tail = tail.on_complete
+        tail.chord_config = config
+
+        if isinstance(task, chord):
+            self._enqueue_chord(task)
+        else:
+            self.enqueue(head)
+
+        return Result(self, tail)
+
+    def _build_pipeline_results(self, callback, callback_result):
+        if not callback.on_complete:
+            return
+
+        pipeline = [callback_result]
+        current = callback.on_complete
+        while current is not None:
+            pipeline.append(Result(self, current))
+            current = current.on_complete
+
+        return ResultGroup(pipeline)
 
     def dequeue(self):
         data = self.storage.dequeue()
@@ -539,8 +545,7 @@ class Huey(object):
             if exception is None:
                 self._check_chord(task, task_value)
             elif not task.retries:
-                err = Error(self.build_error_result(task, exception))
-                self._check_chord(task, err)
+                self._check_chord(task, exception)
 
         if exception is not None and task.retries:
             self._emit(S.SIGNAL_RETRYING, task)
@@ -1155,7 +1160,10 @@ class group(object):
         return chord(self.tasks, task)
 
     def error(self, *args, **kwargs):
-        raise NotImplementedError('error() is not available on `group()`')
+        # Apply error handler to all tasks.
+        for task in self.tasks:
+            task.error(*args, **kwargs)
+        return self
 
 
 class chord(object):
@@ -1288,6 +1296,8 @@ class Result(object):
             retry_delay=self.task.retry_delay,
             priority=priority if priority is not None else self.task.priority,
             expires=expires if expires is not None else self.task.expires,
+            timeout=self.task.timeout,
+            chord_config=self.task.chord_config,
             on_complete=on_complete,
             on_error=on_error)
         return self.huey.enqueue(task)
@@ -1333,6 +1343,9 @@ class ChordResult(object):
     def get(self, *args, **kwargs):
         return self.callback.get(*args, **kwargs)
     __call__ = get
+
+    def reset(self):
+        self.callback.reset()
 
 
 dash_re = re.compile(r'(\d+)-(\d+)')
