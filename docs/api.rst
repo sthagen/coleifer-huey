@@ -147,6 +147,14 @@ Implementations of :py:class:`Huey` which handle task and result persistence.
 
     FileHuey fully supports task priorities.
 
+.. py:class:: BlackHoleHuey
+
+    :py:class:`Huey` that uses :py:class:`BlackHoleStorage`. All storage
+    operations are no-ops: enqueued tasks are silently discarded and the result
+    store is always empty. Intended for testing scenarios where you want to
+    verify that tasks are being called without actually running them or storing
+    anything.
+
 
 Huey object
 -----------
@@ -255,6 +263,25 @@ Huey object
 
             huey = RedisHuey(immediate=True)
 
+    .. py:method:: create_consumer(**options)
+
+        :param options: keyword arguments passed to the :py:class:`Consumer`
+            constructor (e.g. ``workers``, ``worker_type``, ``periodic``,
+            ``initial_delay``, etc.).
+        :returns: a :py:class:`Consumer` instance.
+
+        Create a consumer programmatically, rather than using the
+        ``huey_consumer.py`` command-line tool. This is useful for embedding
+        the consumer within your own application process, or for advanced
+        testing scenarios.
+
+        .. code-block:: python
+
+            consumer = huey.create_consumer(workers=4, worker_type='thread')
+            consumer.start()
+            # ... later ...
+            consumer.stop(graceful=True)
+
     .. py:method:: task(retries=0, retry_delay=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
 
         :param int retries: number of times to retry the function if an
@@ -292,43 +319,12 @@ Huey object
            result of the task function, revoke the task (assuming it hasn't
            started yet), reschedule the task, and more.
 
-        .. note::
-            Huey can be configured to execute the function immediately by
-            instantiating Huey with ``immediate=True`` -- this is useful for
-            running in debug mode or when you do not wish to run the consumer.
-
-            For more information, see the :ref:`immediate mode <immediate>`
-            section of the guide.
-
         The ``task()`` decorator returns a :py:class:`TaskWrapper`, which
-        implements special methods for enqueueing the decorated function. These
-        methods are used to :py:meth:`~TaskWrapper.schedule` the task to run in
-        the future, chain tasks to form a pipeline, and more.
+        implements special methods for enqueueing the decorated function,
+        :py:meth:`~TaskWrapper.schedule` it for the future, chain tasks to
+        form a pipeline, and more.
 
-        Example:
-
-        .. code-block:: python
-
-            from huey import RedisHuey
-
-            huey = RedisHuey()
-
-            @huey.task()
-            def add(a, b):
-                return a + b
-
-        Whenever the ``add()`` function is called, the actual execution will
-        occur when the consumer dequeues the message.
-
-        .. code-block:: pycon
-
-            >>> res = add(1, 2)
-            >>> res
-            <Result: task 6b6f36fc-da0d-4069-b46c-c0d4ccff1df6>
-            >>> res()
-            3
-
-        To further illustrate this point:
+        Example task:
 
         .. code-block:: python
 
@@ -337,55 +333,34 @@ Huey object
                 time.sleep(n)
                 return n
 
-        Calling the ``slow()`` task will return immediately. We can, however,
-        block until the task finishes by waiting for the result:
+        Calling the ``slow()`` task will return immediately. We can block until
+        the task finishes by waiting for the result:
 
         .. code-block:: pycon
 
             >>> res = slow(10)  # Returns immediately.
+
+            >>> res()  # Non-blocking read - returns None if not ready.
+
             >>> res(blocking=True)  # Block until task finishes, ~10s.
             10
 
-        .. note::
-            The return value of any calls to the decorated function depends on
-            whether the :py:class:`Huey` instance is configured to store the
-            results of tasks (``results=True`` is the default). When the result
-            store is disabled, calling a task-decorated function will return
-            ``None`` instead of a result handle.
+        When ``context=True``, the :py:class:`Task` instance is passed to
+        your function as a ``task`` keyword argument. This gives access to
+        the task ID, remaining retries, and :ref:`cooperative timeout
+        <cooperative-timeout>` APIs.
 
-        In some cases, it may be useful to receive the :py:class:`Task`
-        instance itself as an argument.
+        When the result store is disabled (``results=False``), calling a
+        task-decorated function returns ``None`` instead of a
+        :py:class:`Result` handle.
 
-        .. code-block:: python
+        If you stack additional decorators on a task function, note that
+        decorators **above** ``@huey.task()`` run in the calling process,
+        while decorators **below** it run in the consumer worker.
 
-            @huey.task(context=True)  # Include task as an argument.
-            def print_a_task_id(message, task=None):
-                print('%s: %s' % (message, task.id))
-
-
-            print_a_task_id('hello')
-            print_a_task_id('goodbye')
-
-        This would cause the consumer would print something like::
-
-            hello: e724a743-e63e-4400-ac07-78a2fa242b41
-            goodbye: 606f36fc-da0d-4069-b46c-c0d4ccff1df6
-
-        .. note::
-            When using other decorators on task functions, make sure that you
-            understand when they will be evaluated. In the following example
-            the decorator ``a`` will be evaluated in the calling process, while
-            ``b`` will be evaluated in the worker process.
-
-            .. code-block:: python
-
-                @a
-                @huey.task()
-                @b
-                def task():
-                    pass
-
-        For more information, see :py:class:`TaskWrapper`, :py:class:`Task`,
+        For a thorough walkthrough with examples, see the :ref:`guide`. For
+        the full :py:class:`TaskWrapper` API (scheduling, pipelines,
+        revocation, etc.), see :py:class:`TaskWrapper`, :py:class:`Task`,
         and :py:class:`Result`.
 
     .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
@@ -420,27 +395,13 @@ Huey object
 
         The ``periodic_task()`` decorator marks a function for automatic
         execution by the consumer *at a specific interval*, like ``cron``.
+        The ``validate_datetime`` parameter is typically the :py:func:`crontab`
+        helper (described below). The consumer checks once per minute whether
+        the function should run.
 
-        The ``validate_datetime`` parameter is a function which accepts a
-        ``datetime`` object and returns a boolean value whether or not the
-        decorated function should execute at that time or not. The consumer
-        will send a datetime to the function once per minute, giving it the
-        same granularity as the ``cron``.
-
-        For simplicity, there is a special function :py:func:`crontab`, which
-        can be used to quickly specify intervals at which a function should
-        execute. It is described below.
-
-        Here is an example of how you might use the ``periodic_task`` decorator
-        and the :py:func:`crontab`` helper. The following task will be executed
-        every three hours, on the hour:
+        Example — execute every three hours, on the hour:
 
         .. code-block:: python
-
-            from huey import crontab
-            from huey import RedisHuey
-
-            huey = RedisHuey()
 
             @huey.periodic_task(crontab(minute='0', hour='*/3'))
             def update_feeds():
@@ -670,7 +631,7 @@ Huey object
 
             @huey.signal(SIGNAL_ERROR, SIGNAL_LOCKED)
             def task_not_run_handler(signal, task, exc=None):
-                # Do something in response to the "ERROR" or "LOCEKD" signals.
+                # Do something in response to the "ERROR" or "LOCKED" signals.
                 # Note that the "ERROR" signal includes a third parameter,
                 # which is the unhandled exception that was raised by the task.
                 # Since this parameter is not sent with the "LOCKED" signal, we
@@ -686,28 +647,45 @@ Huey object
         are provided, then the handler is disconnected from any signals it may
         have been connected to.
 
+    .. py:method:: notify_interrupted_tasks()
+
+        Emit ``SIGNAL_INTERRUPTED`` for every task that is currently being
+        executed (i.e. in-flight). This is called automatically by the consumer
+        during shutdown. Application code should not normally need to call this
+        method directly, but it is available for custom consumer implementations
+        or advanced testing.
+
+        Tasks are tracked from the moment execution begins until execution
+        completes (or fails). If the consumer is killed mid-task, those tasks
+        remain in the ``_tasks_in_flight`` set, and this method emits
+        ``SIGNAL_INTERRUPTED`` for each one.
+
     .. py:method:: enqueue(task)
 
-        :param Task task: task instance to enqueue.
-        :returns: :py:class:`Result` handle for the given task.
+        :param task: a :py:class:`Task` instance, a :py:class:`group`, or a
+            :py:class:`chord`.
 
-        Enqueue the given task. When the result store is enabled (default), the
-        return value will be a :py:class:`Result` handle which provides access
-        to the result of the task execution (as well as other things).
+        :returns: depends on the input type (see below).
 
-        If the task specifies another task to run on completion (see
-        :py:meth:`Task.then`), the return value will be a
-        :py:class:`ResultGroup`, which encapsulates a list of individual
-        :py:class:`Result` instances for the given pipeline.
+        Enqueue the given task, group, or chord for execution. When the result
+        store is enabled (default), the return value depends on what was
+        enqueued:
+
+        * A single :py:class:`Task`: returns a :py:class:`Result` handle.
+        * A :py:class:`Task` with a pipeline (via :py:meth:`Task.then`):
+          returns a :py:class:`ResultGroup` containing a :py:class:`Result`
+          for each task in the pipeline.
+        * A :py:class:`group`: returns a :py:class:`ResultGroup` containing a
+          :py:class:`Result` for each member task.
+        * A :py:class:`chord`: returns a :py:class:`ChordResult`, which
+          provides access to the member results, the callback result, and any
+          tasks chained after the callback.
 
         .. note::
-            Unless you are executing a pipeline of tasks, it should not
-            be necessary to use the :py:meth:`~Huey.enqueue` method directly.
             Calling (or scheduling) a ``task``-decorated function will
-            automatically enqueue a task for execution.
-
-            When you create a task pipeline, however, it is necessary to
-            enqueue the pipeline once it has been set up.
+            automatically enqueue a task for execution. You only need to call
+            :py:meth:`~Huey.enqueue` directly when working with pipelines,
+            groups, or chords.
 
     .. py:method:: revoke(task, revoke_until=None, revoke_once=False)
 
@@ -853,15 +831,37 @@ Huey object
 
     .. py:method:: flush_locks(*names)
 
-        :param names: additional lock-names to flush.
-        :returns: set of lock names that were set and subsequently cleared.
+        :param names: optional additional lock-names to flush.
+        :returns: set of lock names that were held and subsequently cleared.
 
-        Flush any locks that may be held. Top-level tasks or functions that use
-        the :py:meth:`~Huey.lock_task` decorator will be registered as
-        import-time side-effects, but it is possible that locks in nested
-        scopes (e.g. a context-manager inside a task function) will not be
-        registered. These undiscovered locks can be flushed by passing their
-        lock-names explicitly.
+        Flush any locks that may be held. Locks created by using
+        :py:meth:`~Huey.lock_task` as a **decorator** are automatically
+        discovered (registered at import time). Locks created inside a
+        function body using the **context-manager** form are not automatically
+        discovered, and their names must be passed explicitly.
+
+        When ``names`` are provided, both the discovered locks **and** the
+        explicitly named locks are flushed.
+
+        .. code-block:: python
+
+            # Decorator form — automatically discovered:
+            @huey.periodic_task(crontab(minute='*/5'))
+            @huey.lock_task('reports-lock')
+            def generate_report():
+                run_report()
+
+            # Context-manager form — NOT automatically discovered:
+            @huey.task()
+            def backup():
+                with huey.lock_task('db-backup'):
+                    do_db_backup()
+
+            # Flush discovered locks only:
+            huey.flush_locks()  # Clears 'reports-lock' if held.
+
+            # Flush discovered locks AND the context-manager lock:
+            huey.flush_locks('db-backup')  # Clears both.
 
     .. py:method:: rate_limit(name, limit, per, retry=True)
 
@@ -960,10 +960,40 @@ Huey object
         are destructive. To preserve the value for additional reads, specify
         ``peek=True``.
 
+    .. py:method:: delete(key)
+
+        :param key: key to delete from the result store.
+        :returns: boolean indicating whether the key existed and was deleted.
+
+        Remove a value from the result-store at the given key. Useful for
+        cleaning up manually-stored data created with :py:meth:`~Huey.put`.
+
+    .. py:method:: put_if_empty(key, value)
+
+        :param key: key to store data under.
+        :param value: arbitrary data to store.
+        :returns: boolean indicating whether the value was stored. Returns
+            ``False`` if the key already exists.
+
+        Atomically store a value only if the key does not already exist. This
+        is the primitive used internally by :py:class:`TaskLock` to implement
+        exclusive locking. It can also be used to build custom coordination
+        patterns like task deduplication.
+
     .. py:method:: pending(limit=None)
 
         :param int limit: optionally limit the number of tasks returned.
         :returns: a list of :py:class:`Task` instances waiting to be run.
+
+        .. note::
+            This method must deserialize every task in the queue, which can be
+            slow if the queue is large. Use :py:meth:`~Huey.pending_count` when
+            you only need the count.
+
+    .. py:method:: pending_count()
+
+        :returns: the number of tasks currently in the queue, without
+            deserializing them.
 
     .. py:method:: scheduled(limit=None)
 
@@ -971,10 +1001,28 @@ Huey object
         :returns: a list of :py:class:`Task` instances that are scheduled to
             execute at some time in the future.
 
+        .. note::
+            This method deserializes every task on the schedule. Use
+            :py:meth:`~Huey.scheduled_count` when you only need the count.
+
+    .. py:method:: scheduled_count()
+
+        :returns: the number of tasks currently in the schedule, without
+            deserializing them.
+
     .. py:method:: all_results()
 
         :returns: a dict of task-id to the serialized result data for all
             key/value pairs in the result store.
+
+    .. py:method:: result_count()
+
+        :returns: the number of key/value pairs in the result store.
+
+    .. py:method:: flush()
+
+        Remove all data from the queue, schedule, and result store. This is
+        a destructive operation. Primarily useful for testing.
 
     .. py:method:: __len__()
 
@@ -1018,10 +1066,6 @@ Huey object
         :param int retries: number of times to retry the function if an
             unhandled exception occurs when it is executed.
         :param int retry_delay: number of seconds to wait between retries.
-        :param bool context: when the task is executed, include the
-            :py:class:`Task` instance as a keyword argument.
-        :param str name: name for this task. If not provided, Huey will default
-            to using the module name plus function name.
         :param expires: set expiration time for task - if task is not run
             before ``expires``, it will be discarded. The ``expires`` parameter
             can be either an integer (seconds), a timedelta, or a datetime. For
@@ -1129,6 +1173,14 @@ Huey object
 
         .. note:: The returned task instance is **not** enqueued automatically.
 
+        .. warning::
+            The following keyword argument names are reserved and will be
+            intercepted by Huey rather than passed to your task function:
+            ``eta``, ``delay``, ``retries``, ``retry_delay``, ``priority``,
+            ``expires``, and ``timeout``. If your task function has a parameter
+            with one of these names, rename the parameter or pass the value
+            positionally.
+
         To illustrate the distinction, when you call a ``task()``-decorated
         function, behind-the-scenes, Huey is doing something like this:
 
@@ -1189,6 +1241,20 @@ Huey object
             rg.get(blocking=True)
 
             # [0, 2, 6, 12, 20, 30, 42, 56, 72, 90]
+
+    .. py:method:: unregister()
+
+        :returns: boolean indicating whether the task was found and removed
+            from the registry.
+
+        Remove this task from Huey's internal task registry. After
+        unregistering, the consumer will no longer be able to deserialize or
+        execute instances of this task. If the task is a periodic task, it will
+        also be removed from the periodic task schedule.
+
+        This is primarily useful when working with dynamically-created periodic
+        tasks that need to be removed at runtime.
+
 
 
 .. py:class:: Task(args=None, kwargs=None, id=None, eta=None, retries=None, retry_delay=None, expires=None, timeout=None, on_complete=None, on_error=None)
@@ -1331,20 +1397,23 @@ Huey object
         of an unhandled exception in the parent task.
 
 
-.. py:function:: crontab(month='*', day='*', day_of_week='*', hour='*', minute='*'[, strict=False])
+.. py:function:: crontab(minute='*', hour='*', day='*', month='*', day_of_week='*'[, strict=False])
 
     Convert a "crontab"-style set of parameters into a test function that will
     return ``True`` when a given ``datetime`` matches the parameters set forth in
     the crontab.
 
+    The argument order matches the standard Linux crontab format: minute, hour,
+    day, month, day-of-week.
+
     Day-of-week uses 0=Sunday and 6=Saturday.
 
     Acceptable inputs:
 
-    - "*" = every distinct value
-    - "\*/n" = run every "n" times, i.e. hours='\*/4' == 0, 4, 8, 12, 16, 20
-    - "m-n" = run every time m..n
-    - "m,n" = run on m and n
+    - `*` = every distinct value
+    - `*/n` = run every "n" times, i.e. hours=`*/4` == 0, 4, 8, 12, 16, 20
+    - `m-n` = run every time m..n
+    - `m,n` = run on m and n
 
     :param bool strict: cause crontab to raise a ``ValueError`` if an input
        does not match a supported input format.
@@ -1373,9 +1442,10 @@ Huey object
     is executed at a given time.
 
     If the consumer executes a task and encounters the
-    :py:class:`TaskLockedException`, then the task will not be retried, an
+    :py:class:`TaskLockedException`, then the task will not be executed, an
     error will be logged by the consumer, and a ``SIGNAL_LOCKED`` signal will
-    be emitted.
+    be emitted. If the task is configured with retries, it will be retried
+    normally (the lock is released, so the retry has a chance to acquire it).
 
     See :py:meth:`Huey.lock_task` for example usage.
 
@@ -1422,6 +1492,24 @@ Huey object
         at beginning of next rate-limit window.
     :returns: :py:class:`RateLimit` instance, which can be used as a
         decorator or context-manager.
+
+    .. py:method:: reset()
+
+        Reset the rate-limiter, clearing the current window and counter.
+        The next call to a rate-limited task will start a fresh window.
+
+    .. py:method:: current_usage()
+
+        :returns: the number of invocations in the current rate-limit window.
+            Returns ``0`` if no invocations have occurred in this window.
+
+    .. py:method:: acquire()
+
+        Check whether the rate-limit has been exceeded. If so, raises
+        :py:class:`RateLimitExceeded`. Otherwise, increments the counter and
+        returns normally. This is called automatically when the rate-limiter
+        is used as a decorator or context-manager.
+
 
 
 .. py:class:: group(tasks)
@@ -1744,6 +1832,11 @@ Result
 
         Returns the unique id of the corresponding task.
 
+    .. py:method:: is_ready()
+
+        :returns: whether the task result value is available.
+        :rtype: bool
+
     .. py:method:: get(blocking=False, timeout=None, backoff=1.15, max_delay=1.0, revoke_on_timeout=False, preserve=False)
 
         :param bool blocking: whether to block while waiting for task result
@@ -1809,12 +1902,17 @@ Result
 
         .. seealso:: :py:meth:`TaskWrapper.is_revoked`.
 
-    .. py:method:: reschedule(eta=None, delay=None, expires=None)
+    .. py:method:: reschedule(eta=None, delay=None, expires=None, priority=None, preserve_pipeline=True)
 
         :param datetime eta: execute function at the given time.
         :param int delay: execute function after specified delay in seconds.
         :param expires: set expiration time for task. If not provided, then the
             task's original expire time (if any) will be used.
+        :param priority: override the task's priority. If not provided, the
+            original priority is preserved.
+        :param bool preserve_pipeline: when ``True`` (default), the
+            rescheduled task retains any ``on_complete`` and ``on_error``
+            chains from the original task. Set to ``False`` to discard them.
         :returns: :py:class:`Result` handle for the new task.
 
         Reschedule the given task. The original task instance will be revoked,
@@ -1827,7 +1925,21 @@ Result
     .. py:method:: reset()
 
         Reset the cached result and allow re-fetching a new result for the
-        given task (i.e. after a task error and subsequent retry).
+        given task. This is essential when a task fails and is retried: the
+        first call to :py:meth:`~Result.get` caches the error locally, and
+        subsequent calls return the cached error even after the retry succeeds.
+        Calling ``reset()`` clears the local cache so the next ``get()`` reads
+        from the result store again.
+
+        .. code-block:: python
+
+            result = flaky_task()
+            try:
+                result.get(blocking=True, timeout=5)
+            except TaskException:
+                result.reset()  # Clear cached error.
+                # Now we can read the result from the successful retry:
+                value = result.get(blocking=True, timeout=30)
 
 
 .. py:class:: ResultGroup
@@ -1842,6 +1954,41 @@ Result
         Call :py:meth:`~Result.get` on each individual :py:meth:`Result`
         instance in the group and returns a list of return values. Any keyword
         arguments are passed along.
+
+    .. py:method:: as_completed(backoff=1.15, max_delay=1.0)
+
+        :param float backoff: factor to increase delay between polls.
+        :param float max_delay: maximum seconds between polls.
+        :returns: a generator that yields individual result values as they
+            become available.
+
+        Iterate over results in the order they become ready, rather than the
+        order they were enqueued. This is useful when you want to begin
+        processing results as soon as possible without waiting for all tasks
+        to finish.
+
+        .. code-block:: python
+
+            result_group = huey.enqueue(group([
+                fetch.s(url) for url in urls]))
+
+            for value in result_group.as_completed():
+                process(value)
+
+        The generator polls each result handle in a round-robin fashion with
+        exponential backoff, yielding values as they appear.
+
+    .. py:method:: __getitem__(idx)
+
+        Resolves the result at the given index, blocking until it is ready.
+
+    .. py:method:: __iter__()
+
+        Iterate over the individual :py:class:`Result` instances in the group.
+
+    .. py:method:: __len__()
+
+        Return the number of results in the group.
 
 Serializer
 ----------
@@ -1868,6 +2015,38 @@ Serializer
 
         :param bytes data: serialized data.
         :returns: the deserialized object.
+
+
+.. py:class:: SignedSerializer(secret, salt='huey', **kwargs)
+
+    :param str secret: secret key used to generate HMAC signatures.
+    :param str salt: salt combined with the secret (default ``'huey'``).
+    :param kwargs: additional keyword arguments passed to the base
+        :py:class:`Serializer` (e.g. ``compression``, ``use_zlib``).
+
+    A subclass of :py:class:`Serializer` that adds an HMAC-SHA1 signature to
+    every serialized message. When deserializing, the signature is verified and
+    a ``ValueError`` is raised if the message has been tampered with.
+
+    This is useful when the storage backend (e.g. Redis) is shared or
+    network-exposed and you want to prevent malicious injection of crafted
+    pickle payloads.
+
+    .. code-block:: python
+
+        from huey import RedisHuey
+        from huey.serializer import SignedSerializer
+
+        huey = RedisHuey(
+            'my-app',
+            serializer=SignedSerializer(secret='my-secret-key'))
+
+    .. note::
+        The signed serializer detects tampering but does **not** encrypt the
+        data. Task arguments remain visible in the storage backend.
+
+    Both the application and the consumer must use the same ``secret`` and
+    ``salt``.
 
 .. _exceptions:
 
@@ -1908,11 +2087,17 @@ Exceptions
     When raised from within a :py:meth:`~Huey.pre_execute` hook, this exception
     signals to the consumer that the task shall be cancelled and not run.
 
-    When raised in the body of a :py:meth:`~Huey.task`-decorated function, this
-    exception accepts a boolean ``retry`` parameter (default is ``False``). If
-    ``retry=False`` then the task will not be retried, **even if it has 1 or
-    more retries remaining**. Similarly, if ``retry=True`` then the task will
-    be retried regardless.
+    When raised in the body of a :py:meth:`~Huey.task`-decorated function, the
+    ``retry`` parameter controls whether the task is retried:
+
+    * ``retry=None`` (default): the task's normal retry policy applies. If the
+      task has retries remaining, they are decremented and the task is
+      re-enqueued. If no retries remain, the task is not retried.
+    * ``retry=True``: the task will be retried regardless of whether it was
+      declared with ``retries``. If the task has no retries, Huey sets the
+      retry count to 1 so at least one retry occurs.
+    * ``retry=False``: the task will **not** be retried, even if it has
+      retries remaining.
 
 .. py:class:: RetryTask(msg=None, eta=None, delay=None)
 
