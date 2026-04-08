@@ -83,24 +83,11 @@ class Huey(object):
             generate_nightly_report()
     """
     storage_class = None
-    _deprecated_params = ('result_store', 'events', 'store_errors',
-                          'global_registry')
 
     def __init__(self, name='huey', results=True, store_none=False, utc=True,
                  immediate=False, serializer=None, compression=False,
-                 use_zlib=False, immediate_use_memory=True, always_eager=None,
-                 storage_class=None, **storage_kwargs):
-        if always_eager is not None:
-            warnings.warn('"always_eager" parameter is deprecated, use '
-                          '"immediate" instead', DeprecationWarning)
-            immediate = always_eager
-
-        invalid = [p for p in self._deprecated_params
-                   if storage_kwargs.pop(p, None) is not None]
-        if invalid:
-            warnings.warn('the following Huey initialization arguments are no '
-                          'longer supported: %s' % ', '.join(invalid),
-                          DeprecationWarning)
+                 use_zlib=False, immediate_use_memory=True, storage_class=None,
+                 **storage_kwargs):
 
         self.name = name
         self.results = results
@@ -1239,25 +1226,23 @@ class Result(object):
 
     def get_raw_result(self, blocking=False, timeout=None, backoff=1.15,
                        max_delay=1.0, revoke_on_timeout=False, preserve=False):
-        if not blocking:
+        res = self._get(preserve)
+        if res is not EmptyData:
+            return res
+        elif not blocking:
+            return
+
+        if self.huey.storage.wait_result(self.id, timeout, backoff, max_delay):
             res = self._get(preserve)
             if res is not EmptyData:
-                return res
-        else:
-            start = time.monotonic()
-            delay = .1
-            while self._result is EmptyData:
-                if timeout and time.monotonic() - start >= timeout:
-                    if revoke_on_timeout:
-                        self.revoke()
-                    raise ResultTimeout('timed out waiting for result')
-                if delay > max_delay:
-                    delay = max_delay
-                if self._get(preserve) is EmptyData:
-                    time.sleep(delay)
-                    delay *= backoff
+                return self._result
 
-            return self._result
+        if timeout is not None:
+            if revoke_on_timeout:
+                self.revoke()
+            raise ResultTimeout('timed out waiting for result')
+
+        return self._result
 
     def get(self, blocking=False, timeout=None, backoff=1.15, max_delay=1.0,
             revoke_on_timeout=False, preserve=False):
@@ -1447,14 +1432,6 @@ def crontab(minute='*', hour='*', day='*', month='*', day_of_week='*', strict=Fa
 # Convenience helpers.
 crontab.hourly = partial(crontab, minute='0')
 crontab.daily = partial(crontab, minute='0', hour='0')
-
-
-def _unsupported(name, library):
-    class UnsupportedHuey(Huey):
-        def __init__(self, *args, **kwargs):
-            raise ConfigurationError('Cannot initialize "%s", %s module not '
-                                     'installed.' % (name, library))
-    return UnsupportedHuey
 
 
 # Convenience wrappers for the various storage implementations.

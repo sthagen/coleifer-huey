@@ -177,6 +177,26 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
+    def wait_result(self, key, timeout=None, backoff=1.15, max_delay=1.0):
+        """
+        Block until a result is available for the given key, or until the
+        timeout expires. Returns True if the result is available, or False if
+        the timeout expired.
+
+        The default implementation polls with exponential backoff, but Redis
+        subclasses provide option to override with BLPOP for lower latency
+        result notification (specify notify_result=True).
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        delay = 0.05
+        while True:
+            if self.has_data_for_key(key):
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(min(delay, max_delay))
+            delay *= backoff
+
     def delete_data(self, key):
         """
         Delete the value at the given key, if it exists.
@@ -400,6 +420,7 @@ class RedisStorage(BaseStorage):
 
     def __init__(self, name='huey', blocking=True, read_timeout=1,
                  connection_pool=None, url=None, client_name=None,
+                 notify_result=False, notify_result_ttl=86400,
                  **connection_params):
 
         if Redis is None:
@@ -434,12 +455,21 @@ class RedisStorage(BaseStorage):
         self.result_key = 'huey.results.%s' % self.name
         self.error_key = 'huey.errors.%s' % self.name
         self.counter_key = 'huey.counters.%s' % self.name
+        self.notify_prefix = 'huey.notify.%s.' % self.name
+        self.notify_result = notify_result  # Use result notification.
+        self.notify_result_ttl = notify_result_ttl
 
         if client_name is not None:
             self.conn.client_setname(client_name)
 
         self.blocking = blocking
         self.read_timeout = read_timeout
+
+        try:
+            redis_version = self.conn.info()['redis_version']
+        except Exception:
+            redis_version = '0.0.0'
+        self.redis_version = tuple(int(i) for i in redis_version.split('.'))
 
     def clean_name(self, name):
         return re.sub('[^A-Za-z0-9_]', '', name)
@@ -498,6 +528,12 @@ class RedisStorage(BaseStorage):
 
     def put_data(self, key, value, is_result=False):
         self.conn.hset(self.result_key, key, value)
+        if is_result and self.notify_result:
+            nkey = self.notify_prefix + key
+            pipe = self.conn.pipeline()
+            pipe.lpush(nkey, b'1')
+            pipe.expire(nkey, self.notify_result_ttl)
+            pipe.execute()
 
     def peek_data(self, key):
         pipe = self.conn.pipeline()
@@ -513,6 +549,28 @@ class RedisStorage(BaseStorage):
         pipe.hdel(self.result_key, key)
         exists, val, n = pipe.execute()
         return EmptyData if not exists else val
+
+    def wait_result(self, key, timeout=None, backoff=1.15, max_delay=1.0):
+        if not self.notify_result:
+            return super(RedisStorage, self).wait_result(key, timeout,
+                                                         backoff, max_delay)
+
+        if self.has_data_for_key(key):
+            return True
+        nkey = self.notify_prefix + key
+        timeout = timeout or 0
+        if timeout > 0 and self.redis_version[0] < 6:
+            timeout = min(1, int(timeout))  # Timeout must be int for R < 6.
+        try:
+            result = self.conn.blpop(nkey, timeout=timeout)
+        except (ConnectionError, TimeoutError):
+            return False
+
+        if result is not None:
+            self.conn.delete(nkey)
+            return True
+
+        return False
 
     def has_data_for_key(self, key):
         return self.conn.hexists(self.result_key, key)
@@ -560,6 +618,13 @@ class RedisExpireStorage(RedisStorage):
             # We only want to expire task result data. If we are storing an
             # important metadata like a revocation key, we need to preserve it.
             self.conn.setex(self.result_key(key), self._expire_time, value)
+            if isinstance(key, bytes):
+                key = key.decode('utf8')
+            nkey = self.notify_prefix + key
+            pipe = self.conn.pipeline()
+            pipe.lpush(nkey, b'1')
+            pipe.expire(nkey, self.notify_result_ttl)
+            pipe.execute()
         else:
             self.conn.set(self.result_key(key), value)
 
@@ -667,20 +732,7 @@ class PriorityRedisStorage(RedisPriorityQueue, RedisStorage): pass
 class PriorityRedisExpireStorage(RedisPriorityQueue, RedisExpireStorage): pass
 
 
-class _ConnectionState(object):
-    def __init__(self, **kwargs):
-        super(_ConnectionState, self).__init__(**kwargs)
-        self.reset()
-    def reset(self):
-        self.conn = None
-        self.closed = True
-    def set_connection(self, conn):
-        self.conn = conn
-        self.closed = False
-class _ConnectionLocal(_ConnectionState, threading.local): pass
-
 # Python 2.x may return <buffer> object for BLOB columns.
-to_bytes = lambda b: bytes(b) if not isinstance(b, bytes) else b
 to_blob = lambda b: sqlite3.Binary(b)
 
 
@@ -690,41 +742,45 @@ class BaseSqlStorage(BaseStorage):
 
     def __init__(self, *args, **kwargs):
         super(BaseSqlStorage, self).__init__(*args, **kwargs)
-        self._state = _ConnectionLocal()
+        self.lock = threading.Lock()
+        self._conn = None
         self.initialize_schema()
 
     def close(self):
-        if self._state.closed: return False
-        self._state.conn.close()
-        self._state.reset()
+        if self._conn is None:
+            return False
+        with self.lock:
+            self._conn.close()
+            self._conn = None
         return True
 
     @property
     def conn(self):
-        if self._state.closed:
-            self._state.set_connection(self._create_connection())
-        return self._state.conn
+        if self._conn is None:
+            self._conn = self._create_connection()
+        return self._conn
 
     def _create_connection(self):
         raise NotImplementedError
 
     @contextlib.contextmanager
     def db(self, commit=False, close=False):
-        conn = self.conn
-        cursor = conn.cursor()
-        try:
-            if commit: cursor.execute(self.begin_sql)
-            yield cursor
-        except Exception:
-            if commit: conn.rollback()
-            raise
-        else:
-            if commit: conn.commit()
-        finally:
-            cursor.close()
-            if close:
-                conn.close()
-                self._state.reset()
+        with self.lock:
+            conn = self.conn
+            cursor = conn.cursor()
+            try:
+                if commit: cursor.execute(self.begin_sql)
+                yield cursor
+            except Exception:
+                if commit: conn.rollback()
+                raise
+            else:
+                if commit: conn.commit()
+            finally:
+                cursor.close()
+                if close:
+                    conn.close()
+                    self._conn = None
 
     def initialize_schema(self):
         with self.db(commit=True, close=True) as curs:
@@ -785,6 +841,7 @@ class SqliteStorage(BaseSqlStorage):
 
     def _create_connection(self):
         conn = sqlite3.connect(self.filename, timeout=self._timeout,
+                               check_same_thread=False,
                                **self._conn_kwargs)
         conn.isolation_level = None  # Autocommit mode.
         conn.execute('pragma journal_mode="%s"' % self._journal_mode)
@@ -806,7 +863,7 @@ class SqliteStorage(BaseSqlStorage):
                 tid, data = result
                 curs.execute('delete from task where id = ?', (tid,))
                 if curs.rowcount == 1:
-                    return to_bytes(data)
+                    return data
 
     def queue_size(self):
         return self.sql('select count(id) from task where queue=?',
@@ -819,7 +876,7 @@ class SqliteStorage(BaseSqlStorage):
             sql += ' limit ?'
             params = (self.name, limit)
 
-        return [to_bytes(i) for i, in self.sql(sql, params, results=True)]
+        return [i for i, in self.sql(sql, params, results=True)]
 
     def flush_queue(self):
         self.sql('delete from task where queue=?', (self.name,), commit=True)
@@ -837,7 +894,7 @@ class SqliteStorage(BaseSqlStorage):
             id_list, data = [], []
             for task_id, task_data in curs.fetchall():
                 id_list.append(task_id)
-                data.append(to_bytes(task_data))
+                data.append(task_data)
             if id_list:
                 plist = ','.join('?' * len(id_list))
                 curs.execute('delete from schedule where id IN (%s)' % plist,
@@ -855,7 +912,7 @@ class SqliteStorage(BaseSqlStorage):
             sql += ' limit ?'
             params = (self.name, limit)
 
-        return [to_bytes(i) for i, in self.sql(sql, params, results=True)]
+        return [i for i, in self.sql(sql, params, results=True)]
 
     def flush_schedule(self):
         self.sql('delete from schedule where queue = ?', (self.name,), True)
@@ -867,7 +924,7 @@ class SqliteStorage(BaseSqlStorage):
     def peek_data(self, key):
         res = self.sql('select value from kv where queue = ? and key = ?',
                        (self.name, key), results=True)
-        return to_bytes(res[0][0]) if res else EmptyData
+        return res[0][0] if res else EmptyData
 
     def pop_data(self, key):
         with self.db(commit=True) as curs:
@@ -876,7 +933,7 @@ class SqliteStorage(BaseSqlStorage):
                              'returning value', (self.name, key))
                 result = curs.fetchone()
                 if result is not None:
-                    return to_bytes(result[0])
+                    return result[0]
             else:
                 curs.execute('select value from kv where queue = ? and key = ?',
                              (self.name, key))
@@ -885,7 +942,7 @@ class SqliteStorage(BaseSqlStorage):
                     curs.execute('delete from kv where queue=? and key=?',
                                  (self.name, key))
                     if curs.rowcount == 1:
-                        return to_bytes(result[0])
+                        return result[0]
             return EmptyData
 
     def has_data_for_key(self, key):
@@ -937,7 +994,7 @@ class SqliteStorage(BaseSqlStorage):
     def result_items(self):
         res = self.sql('select key, value from kv where queue=?', (self.name,),
                        results=True)
-        return dict((k, to_bytes(v)) for k, v in res)
+        return dict((k, v) for k, v in res)
 
     def flush_results(self):
         self.sql('delete from kv where queue=?', (self.name,), True)

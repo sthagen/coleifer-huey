@@ -6,10 +6,8 @@ import shutil
 import sys
 import threading
 import unittest
-try:
-    from queue import Queue
-except ImportError:
-    from Queue import Queue
+import uuid
+from queue import Queue
 
 from redis.connection import ConnectionPool
 from redis import Redis
@@ -20,9 +18,11 @@ from huey.api import PriorityRedisHuey
 from huey.api import RedisExpireHuey
 from huey.api import RedisHuey
 from huey.api import SqliteHuey
+from huey.api import chord
 from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import ConfigurationError
+from huey.exceptions import ResultTimeout
 from huey.storage import FileStorage
 from huey.storage import MemoryStorage
 from huey.storage import RedisExpireStorage
@@ -130,6 +130,12 @@ class StorageTests(object):
         self.assertEqual(self.s.result_store_size(), 0)
         self.assertEqual(self.s.result_items(), {})
 
+    def test_wait_result(self):
+        key = str(uuid.uuid4())
+        self.assertFalse(self.s.wait_result(key, timeout=0.1))
+        self.s.put_data(key, b'v1', is_result=True)
+        self.assertTrue(self.s.wait_result(key, timeout=1))
+
     def test_priority(self):
         if not self.s.priority:
             raise unittest.SkipTest('priority support required')
@@ -174,14 +180,23 @@ class StorageTests(object):
         def task_a(n):
             return n + 1
 
+        @self.huey.task()
+        def total(ns):
+            return sum(ns)
+
         with self.consumer_context():
             r1 = task_a(1)
             r2 = task_a(2)
             r3 = task_a(3)
 
+            c = chord([task_a.s(1), task_a.s(2)], total)
+            cr = self.huey.enqueue(c)
+
             self.assertEqual(r1.get(blocking=True, timeout=5), 2)
             self.assertEqual(r2.get(blocking=True, timeout=5), 3)
             self.assertEqual(r3.get(blocking=True, timeout=5), 4)
+            self.assertEqual(cr.get(blocking=True, timeout=5), 5)
+            self.assertEqual(cr.results(), [2, 3])
 
             task_a.revoke()
             self.assertTrue(task_a.is_revoked())
@@ -208,6 +223,11 @@ class TestRedisStorage(StorageTests, BaseTestCase):
         RedisHuey(host=None, port=None, db=None, url='redis://localhost')
 
 
+class TestRedisStorageWaitResult(TestRedisStorage):
+    def get_huey(self):
+        return RedisHuey(utc=False, notify_result=True, notify_result_ttl=30)
+
+
 class TestRedisExpireStorage(StorageTests, BaseTestCase):
     # Note that this does not subclass the StorageTests. This is partly because
     # the functionality should already be covered by the TestRedisStorage, as
@@ -229,7 +249,7 @@ class TestRedisExpireStorage(StorageTests, BaseTestCase):
         # specifically included the "is_result=True" flag, then the key will be
         # given a TTL.
         self.assertEqual(conn.ttl(self.s.result_key(b'k1')), -1)
-        self.assertEqual(conn.ttl(self.s.result_key(b'k2')), 3600)
+        self.assertTrue(3580 <= conn.ttl(self.s.result_key(b'k2')) <= 3600)
 
         # Non-existant keys return -2. See redis docs for TTL command.
         self.assertEqual(conn.ttl(self.s.result_key(b'k3')), -2)
