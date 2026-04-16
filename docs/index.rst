@@ -6,7 +6,7 @@
 huey
 ====
 
-.. image:: http://media.charlesleifer.com/blog/photos/huey2-logo.png
+.. image:: https://media.charlesleifer.com/blog/photos/huey3-logo.png
 
 *a lightweight alternative*.
 
@@ -123,6 +123,7 @@ Table of contents
    api
    contrib
    troubleshooting
+   recipes
    changes
 
 Huey is named in honor of my cat
