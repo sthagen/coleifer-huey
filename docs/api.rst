@@ -1276,7 +1276,7 @@ Huey object
 
 
 
-.. py:class:: Task(args=None, kwargs=None, id=None, eta=None, retries=None, retry_delay=None, expires=None, timeout=None, on_complete=None, on_error=None)
+.. py:class:: Task(args=None, kwargs=None, id=None, eta=None, retries=None, retry_delay=None, priority=None, expires=None, timeout=None, on_complete=None, on_error=None)
 
     :param tuple args: arguments for the function call.
     :param dict kwargs: keyword arguments for the function call.
@@ -1501,6 +1501,17 @@ Huey object
     When a task fails due to being rate-limited, it will be automatically
     rescheduled to run at the start of the next window when ``retry=True`` or
     the task itself has one or more ``retries``.
+
+    Interaction between task retries and the ``retry`` flag on the rate-limit:
+
+    * ``retry=True``, task has no retries: task will be retried at the start of
+      the next window (or ``task.retry_delay`` if specified).
+    * ``retry=True``, task has 1 or more retries: same as above, except task's
+      own retry count is *preserved*.
+    * ``retry=False``, task has no retries: error is the final state, task is
+      not rescheduled.
+    * ``retry=False``, task has 1 or more retries: task retries decrement
+      normally and the task's ``retry_delay`` is honored.
 
     Rate-limited tasks emit a ``SIGNAL_RATE_LIMITED``.
 
