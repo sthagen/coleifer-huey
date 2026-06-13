@@ -24,7 +24,7 @@ To test, run the consumer, specifying the import path to the ``huey`` object:
 
 .. code-block:: shell
 
-    huey_consumer.py demo.huey
+    huey_consumer demo.huey
 
 In a Python shell, we can call our ``add`` task:
 
@@ -1272,6 +1272,13 @@ What happens when a :py:class:`chord` is enqueued?
    order. The final callback is then enqueued with the sub-task results.
 4. The callback is executed by a worker and the final result is made available.
 
+.. note::
+    A sub-task that is skipped without executing -- because it was revoked,
+    expired, or cancelled by a pre-execute hook -- still counts towards chord
+    completion and contributes ``None`` as its result. A sub-task that is
+    interrupted by an abrupt consumer shutdown, however, is lost (tasks are
+    delivered at-most-once), in which case the callback will not fire.
+
 Enqueueing a :py:class:`chord` returns a :py:class:`ChordResult`, which
 provides access to the final callback result, the sub-task results, and any
 tasks chained to the final callback.
@@ -1478,9 +1485,10 @@ In this example, ``alert_admin`` runs if ``aggregate`` raises an exception,
 *not* if a member fails.
 
 .. note::
-    Revoking a chord member will prevent it from running, which will prevent
-    the chord from ever completing. If you need to cancel a chord, revoke the
-    callback task instead.
+    Revoking a chord member will prevent it from running, but the chord will
+    still complete: the revoked member contributes ``None`` to the results
+    and the callback fires normally. If you need to cancel a chord, revoke
+    the callback task instead.
 
 .. note::
     Unlike regular tasks, chord sub-task results are stored unconditionally

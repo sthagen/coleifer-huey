@@ -221,7 +221,7 @@ Huey object
 
     .. code-block:: console
 
-        $ huey_consumer.py demo.huey -w 4
+        $ huey_consumer demo.huey -w 4
 
     To add two numbers, the "huey" way:
 
@@ -286,7 +286,7 @@ Huey object
         :returns: a :py:class:`Consumer` instance.
 
         Create a consumer programmatically, rather than using the
-        ``huey_consumer.py`` command-line tool. This is useful for embedding
+        ``huey_consumer`` command-line tool. This is useful for embedding
         the consumer within your own application process, or for advanced
         testing scenarios.
 
@@ -303,7 +303,9 @@ Huey object
             unhandled exception occurs when it is executed.
         :param int retry_delay: number of seconds to wait between retries.
         :param int priority: priority assigned to task, higher numbers are
-            processed first by the consumer when there is a backlog.
+            processed first by the consumer when there is a backlog. See
+            :ref:`priority` (requires a storage backend with priority
+            support, e.g. :py:class:`SqliteHuey` or :py:class:`PriorityRedisHuey`).
         :param bool context: when the task is executed, include the
             :py:class:`Task` instance as a keyword argument.
         :param str name: name for this task. If not provided, Huey will default
@@ -387,7 +389,9 @@ Huey object
             unhandled exception occurs when it is executed.
         :param int retry_delay: number of seconds to wait in-between retries.
         :param int priority: priority assigned to task, higher numbers are
-            processed first by the consumer when there is a backlog.
+            processed first by the consumer when there is a backlog. See
+            :ref:`priority` (requires a storage backend with priority
+            support, e.g. :py:class:`SqliteHuey` or :py:class:`PriorityRedisHuey`).
         :param bool context: when the task is executed, include the
             :py:class:`Task` instance as a parameter.
         :param str name: name for this task. If not provided, Huey will default

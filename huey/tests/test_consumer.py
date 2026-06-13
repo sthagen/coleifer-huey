@@ -1,6 +1,12 @@
 import datetime
+import os
+import shutil
+import sys
+import tempfile
 import time
+import unittest
 
+from huey import SqliteHuey
 from huey.api import crontab
 from huey.consumer import Consumer
 from huey.consumer import Scheduler
@@ -137,6 +143,28 @@ class TestConsumerIntegration(BaseTestCase):
         self.work_on_tasks(consumer, 1)
         self.assertEqual(state, ['p1', 'p2', 'p1'])  # No change, not executed.
 
+    def test_scheduler_periodic_catch_up(self):
+        @self.huey.periodic_task(crontab(minute='*'))
+        def task_p():
+            pass
+
+        consumer = self.consumer(workers=1)
+        scheduler = consumer._create_scheduler()
+        scheduler._next_loop = time.monotonic() + 60
+
+        # Simulate a 5-minute stall (e.g. suspend/resume): the periodic check
+        # timestamp is far in the past. The scheduler skips the missed checks
+        # and fires once for the current minute, rather than running the
+        # back-to-back checks, which would enqueue duplicate tasks.
+        scheduler._next_periodic = time.monotonic() - 300
+        scheduler.loop(datetime.datetime(2000, 1, 1, 0, 0))
+        self.assertEqual(len(self.huey), 1)
+        self.assertTrue(scheduler._next_periodic > time.monotonic())
+
+        # Subsequent iterations do not re-fire for the stalled period.
+        scheduler.loop(datetime.datetime(2000, 1, 1, 0, 0))
+        self.assertEqual(len(self.huey), 1)
+
 
 class TestConsumerConfig(BaseTestCase):
     def test_default_config(self):
@@ -166,6 +194,16 @@ class TestConsumerConfig(BaseTestCase):
         self.assertEqual(consumer.scheduler_interval, 30)
         self.assertFalse(consumer._health_check)
 
+    @unittest.skipIf(sys.platform == 'win32', 'requires fork()')
+    def test_process_environment_uses_fork(self):
+        # The worker/scheduler runnables cannot be pickled, so the process
+        # environment must use the fork start-method regardless of the
+        # platform default (spawn on MacOS 3.8+, forkserver on Linux 3.14+).
+        cfg = ConsumerConfig(worker_type='process')
+        cfg.validate()
+        consumer = self.huey.create_consumer(**cfg.values)
+        self.assertEqual(consumer.environment.mp.get_start_method(), 'fork')
+
     def test_invalid_values(self):
         def assertInvalid(**kwargs):
             cfg = ConsumerConfig(**kwargs)
@@ -175,3 +213,33 @@ class TestConsumerConfig(BaseTestCase):
         assertInvalid(scheduler_interval=90)
         assertInvalid(scheduler_interval=7)
         assertInvalid(scheduler_interval=45)
+
+
+class TestProcessWorkers(unittest.TestCase):
+    @unittest.skipIf(sys.platform == 'win32', 'requires fork()')
+    @slow_test()
+    def test_process_worker_integration(self):
+        # End-to-end check that tasks execute in forked worker processes,
+        # regardless of the platform's default start-method. Memory storage
+        # cannot be used here (the forked workers would operate on copies),
+        # so run against a sqlite database shared by parent and children.
+        tmp_dir = tempfile.mkdtemp()
+        huey = SqliteHuey('proctest', filename=os.path.join(tmp_dir, 'h.db'))
+
+        @huey.task()
+        def add_pid(a, b):
+            return (a + b, os.getpid())
+
+        consumer = huey.create_consumer(workers=2, worker_type='process')
+        consumer.start()
+        try:
+            r1, r2 = add_pid(1, 2), add_pid(3, 4)
+            val1, pid1 = r1.get(blocking=True, timeout=10)
+            val2, pid2 = r2.get(blocking=True, timeout=10)
+            self.assertEqual((val1, val2), (3, 7))
+            # The tasks ran in worker processes, not in this process.
+            self.assertNotEqual(pid1, os.getpid())
+            self.assertNotEqual(pid2, os.getpid())
+        finally:
+            consumer.stop(graceful=True)
+            shutil.rmtree(tmp_dir, ignore_errors=True)

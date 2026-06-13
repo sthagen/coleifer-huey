@@ -102,15 +102,17 @@ def normalize_expire_time(expires, utc=True):
 
 
 def normalize_time(eta=None, delay=None, utc=True):
-    if not ((delay is None) ^ (eta is None)):
+    if (delay is None) == (eta is None):
         raise ValueError('Specify either an eta (datetime) or delay (seconds)')
-    elif delay:
+    elif delay is not None:
         method = (utc and utcnow or
                   datetime.datetime.now)
         if not isinstance(delay, datetime.timedelta):
             delay = datetime.timedelta(seconds=delay)
         return method() + delay
-    elif eta:
+    elif not isinstance(eta, datetime.datetime):
+        raise ValueError('eta must be a datetime instance')
+    else:
         has_tz = not is_naive(eta)
         if utc:
             if not has_tz:
@@ -152,8 +154,6 @@ class FileLock(object):
         dirname = os.path.dirname(filename)
         if not os.path.exists(dirname):
             os.makedirs(dirname)
-        elif os.path.exists(self.filename):
-            os.unlink(self.filename)
 
     def acquire(self):
         flags = os.O_CREAT | os.O_TRUNC | os.O_RDWR
@@ -186,11 +186,11 @@ def process_timeout(seconds):
         raise TaskTimeout('timeout (%ss)' % seconds)
 
     orig = signal.signal(signal.SIGALRM, _handle_alrm)
-    signal.alarm(int(seconds))
+    signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
         yield
     finally:
-        signal.alarm(0)  # Cancel any pending alarm.
+        signal.setitimer(signal.ITIMER_REAL, 0)  # Cancel any pending alarm.
         signal.signal(signal.SIGALRM, orig)
 
 @contextlib.contextmanager
