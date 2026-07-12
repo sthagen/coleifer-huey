@@ -1,11 +1,12 @@
 __author__ = 'Charles Leifer'
 __license__ = 'MIT'
-__version__ = '3.0.3'
+__version__ = '3.2.1'
 
 from huey.api import BlackHoleHuey
 from huey.api import Huey
 from huey.api import FileHuey
 from huey.api import MemoryHuey
+from huey.api import PostgresHuey
 from huey.api import PriorityRedisExpireHuey
 from huey.api import PriorityRedisHuey
 from huey.api import RedisExpireHuey

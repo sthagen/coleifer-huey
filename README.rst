@@ -10,10 +10,12 @@ huey is:
 
 huey has:
 
-* support for redis (or valkey/redict), sqlite, file-system, or in-memory storage
-* zero dependencies (``redis-py`` required to use redis-like brokers).
+* support for redis (or valkey/redict), postgres, sqlite, file-system, or in-memory storage
+* zero dependencies (``redis-py`` required to use redis-like brokers,
+  ``psycopg`` for postgres).
 * `example code <https://github.com/coleifer/huey/tree/master/examples/>`_.
 * `django <https://huey.readthedocs.io/en/latest/django.html>`_ integration (native or via django.tasks)
+  with admin integration for visibility and management.
 * `documentation <https://huey.readthedocs.io/>`_.
 
 huey supports:
@@ -38,6 +40,7 @@ At a glance
 
     from huey import RedisHuey, crontab
 
+    # Or PostgresHuey, SqliteHuey, FileHuey, etc...
     huey = RedisHuey('my-app', host='redis.myapp.com')
 
     @huey.task()
@@ -115,7 +118,24 @@ Although Huey was designed with Redis in mind, the storage system implements a
 simple API and many other tools could be used instead of Redis if that's your
 preference.
 
-Huey comes with builtin support for Redis, Sqlite and in-memory storage.
+Huey comes with builtin support for Redis, Postgres, Sqlite, File-system, and
+in-memory storage.
+
+Frameworks
+----------
+
+Huey provides Django integration either natively or via ``django.tasks``. Huey
+also provides an optional admin integration for Django:
+
+.. image:: https://huey.readthedocs.io/en/latest/_images/django-admin.png
+
+Huey also provides `flask-peewee <https://flask-peewee.readthedocs.io/>`_ admin
+integration based on the same underlying stat-tracking system:
+
+.. image:: https://huey.readthedocs.io/en/latest/_images/flask-admin-panel.png
+
+Other frameworks can use the `stats <https://huey.readthedocs.io/en/latest/contrib.html#task-statistics>`_
+extension to collect and display this information.
 
 Documentation
 ----------------
@@ -130,4 +150,3 @@ Project page
 Huey is named in honor of my cat:
 
 .. image:: http://m.charlesleifer.com/t/800x-/blog/photos/p1473037658.76.jpg?key=mD9_qMaKBAuGPi95KzXYqg
-

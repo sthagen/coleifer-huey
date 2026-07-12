@@ -18,10 +18,13 @@ huey is:
 
 huey has:
 
-* support for redis (or valkey/redict), sqlite, file-system, or in-memory storage
-* zero dependencies (``redis-py`` required to use redis-like brokers).
+* support for redis (or valkey/redict), postgres, sqlite, file-system, or in-memory storage
+* zero dependencies (``redis-py`` required to use redis-like brokers,
+  ``psycopg`` for postgres).
 * `example code <https://github.com/coleifer/huey/tree/master/examples/>`_.
-* :ref:`django <django>` integration (native or via django.tasks)
+* :ref:`django <django>` integration (native or via django.tasks) with
+  optional :ref:`admin integration <django-admin-stats>` for visibility and
+  management.
 
 huey supports:
 

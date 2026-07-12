@@ -1,10 +1,8 @@
-from collections import deque
-import base64
+from functools import cached_property
 import contextlib
 import hashlib
 import heapq
 import itertools
-import json
 import os
 import re
 import shutil
@@ -15,18 +13,19 @@ except ImportError:
 import struct
 import threading
 import time
-import warnings
 
 try:
     from redis import ConnectionPool
-    try:
-        from redis import StrictRedis as Redis
-    except ImportError:
-        from redis import Redis
+    from redis import Redis
     from redis.exceptions import ConnectionError
     from redis.exceptions import TimeoutError
 except ImportError:
     ConnectionPool = Redis = ConnectionError = TimeoutError = None
+
+try:
+    import psycopg
+except ImportError:
+    psycopg = None
 
 from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
@@ -363,7 +362,7 @@ class MemoryStorage(BaseStorage):
         return len(self._schedule)
 
     def scheduled_items(self, limit=None):
-        items = sorted(data for _, data in self._schedule)
+        items = [data for _, data in sorted(self._schedule)]
         if limit:
             items = items[:limit]
         return items
@@ -462,7 +461,6 @@ class RedisStorage(BaseStorage):
         self.queue_key = 'huey.redis.%s' % self.name
         self.schedule_key = 'huey.schedule.%s' % self.name
         self.result_key = 'huey.results.%s' % self.name
-        self.error_key = 'huey.errors.%s' % self.name
         self.counter_key = 'huey.counters.%s' % self.name
         self.notify_prefix = 'huey.notify.%s.' % self.name
         self.notify_result = notify_result  # Use result notification.
@@ -474,13 +472,15 @@ class RedisStorage(BaseStorage):
         self.blocking = blocking
         self.read_timeout = read_timeout
 
-        # Try to be robust against weird values in version.
+    @cached_property
+    def redis_version(self):
+        # Server version, used only to clamp BLPOP timeouts for redis < 6.
         try:
-            redis_version = str(self.conn.info()['redis_version'])
+            version = str(self.conn.info()['redis_version'])
         except Exception:
-            redis_version = '0.0.0'
-        self.redis_version = tuple(int(i) if i.isdigit() else 999
-                                   for i in redis_version.split('.'))
+            version = '0.0.0'  # Assume old, int timeouts always work.
+        return tuple(int(i) if i.isdigit() else 999
+                     for i in version.split('.'))
 
     def clean_name(self, name):
         return re.sub('[^A-Za-z0-9_]', '', name)
@@ -536,20 +536,25 @@ class RedisStorage(BaseStorage):
         return self.conn.zcard(self.schedule_key)
 
     def scheduled_items(self, limit=None):
-        limit = limit or -1
-        return self.conn.zrange(self.schedule_key, 0, limit, withscores=False)
+        stop = limit - 1 if limit else -1
+        return self.conn.zrange(self.schedule_key, 0, stop, withscores=False)
 
     def flush_schedule(self):
         self.conn.delete(self.schedule_key)
 
+    def _notify(self, key):
+        if isinstance(key, bytes):
+            key = key.decode('utf8')
+        nkey = self.notify_prefix + key
+        pipe = self.conn.pipeline()
+        pipe.lpush(nkey, b'1')
+        pipe.expire(nkey, self.notify_result_ttl)
+        pipe.execute()
+
     def put_data(self, key, value, is_result=False):
         self.conn.hset(self.result_key, key, value)
         if is_result and self.notify_result:
-            nkey = self.notify_prefix + key
-            pipe = self.conn.pipeline()
-            pipe.lpush(nkey, b'1')
-            pipe.expire(nkey, self.notify_result_ttl)
-            pipe.execute()
+            self._notify(key)
 
     def peek_data(self, key):
         pipe = self.conn.pipeline()
@@ -633,15 +638,9 @@ class RedisExpireStorage(RedisStorage):
         if is_result:
             # We only want to expire task result data. If we are storing an
             # important metadata like a revocation key, we need to preserve it.
-            self.conn.setex(self.result_key(key), self._expire_time, value)
-            if isinstance(key, bytes):
-                key = key.decode('utf8')
+            self.conn.set(self.result_key(key), value, ex=self._expire_time)
             if self.notify_result:
-                nkey = self.notify_prefix + key
-                pipe = self.conn.pipeline()
-                pipe.lpush(nkey, b'1')
-                pipe.expire(nkey, self.notify_result_ttl)
-                pipe.execute()
+                self._notify(key)
         else:
             self.conn.set(self.result_key(key), value)
 
@@ -756,10 +755,12 @@ class BaseSqlStorage(BaseStorage):
     ddl = []
 
     def __init__(self, *args, **kwargs):
+        create_tables = kwargs.pop('create_tables', True)
         super(BaseSqlStorage, self).__init__(*args, **kwargs)
         self.lock = threading.Lock()
         self._conn = None
-        self.initialize_schema()
+        if create_tables:
+            self.initialize_schema()
 
     def close(self):
         if self._conn is None:
@@ -833,7 +834,7 @@ class SqliteStorage(BaseSqlStorage):
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=False, journal_mode='wal', timeout=5, strict_fifo=False,
-                 **kwargs):
+                 create_tables=True, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
         self._fsync = fsync
@@ -848,13 +849,15 @@ class SqliteStorage(BaseSqlStorage):
         # NOTE: changing an existing database is not supported, so you will
         # need to delete and re-create it to change this value.
         if strict_fifo:
-            self.ddl[3] = self.table_task.replace(
+            ddl = list(self.ddl)
+            ddl[3] = self.table_task.replace(
                 'primary key',
                 'primary key autoincrement')
+            self.ddl = ddl
 
         self.to_blob = lambda b: sqlite3.Binary(b)
 
-        super(SqliteStorage, self).__init__(name)
+        super(SqliteStorage, self).__init__(name, create_tables=create_tables)
 
     def _create_connection(self):
         conn = sqlite3.connect(self.filename, timeout=self._timeout,
@@ -1021,6 +1024,284 @@ class SqliteStorage(BaseSqlStorage):
         self.sql('delete from counter where queue=?', (self.name,), True)
 
 
+class PostgresStorage(BaseSqlStorage):
+    def __init__(self, name='huey', dsn=None, connection=None, blocking=True,
+                 read_timeout=1, table_prefix='huey', create_tables=True,
+                 **connection_params):
+        if psycopg is None:
+            raise ConfigurationError('"psycopg" (version 3.2 or newer) not '
+                                     'found, cannot use Postgres storage '
+                                     'backend. Run "pip install psycopg" to '
+                                     'install.')
+        self.dsn = dsn
+        self.connection = connection  # Zero-arg callable returning conn.
+        self.blocking = blocking
+        self.read_timeout = read_timeout
+        self.connection_params = connection_params
+
+        prefix = re.sub('[^A-Za-z0-9_]', '', table_prefix)
+        self.table_kv = prefix + '_kv'
+        self.table_schedule = prefix + '_schedule'
+        self.table_task = prefix + '_task'
+        self.table_counter = prefix + '_counter'
+
+        # Postgres channel names longer than 63 bytes raise "channel name
+        # too long" from pg_notify(), which would break every enqueue.
+        channel = '%s.q.%s' % (prefix, name)
+        if len(channel.encode('utf-8')) > 63:
+            digest = hashlib.md5(channel.encode('utf-8')).hexdigest()
+            channel = 'huey.q.%s' % digest
+        self.channel = channel
+
+        self.ddl = [q.format(p=prefix) for q in (
+            'create table if not exists {p}_kv ('
+            'queue text not null, key text not null, value bytea not null, '
+            'primary key(queue, key))',
+
+            'create table if not exists {p}_schedule ('
+            'id bigserial primary key, queue text not null, '
+            'data bytea not null, timestamp double precision not null)',
+
+            'create index if not exists {p}_schedule_queue_timestamp '
+            'on {p}_schedule (queue, timestamp)',
+
+            'create table if not exists {p}_task ('
+            'id bigserial primary key, queue text not null, '
+            'data bytea not null, '
+            'priority double precision not null default 0.0)',
+
+            'create index if not exists {p}_task_queue_priority_id '
+            'on {p}_task (queue, priority desc, id)',
+
+            'create table if not exists {p}_counter ('
+            'queue text not null, key text not null, '
+            'value bigint not null default 0, primary key(queue, key))')]
+
+        # Do not reuse conns across fork!
+        self._inherited = []
+        self._conn_pid = None
+
+        # Each worker thread gets its own LISTEN connection on first
+        # dequeue. A dead thread's connection is released by GC: psycopg
+        # only sends the protocol Terminate from the creating process, so
+        # this is safe on both sides of a fork.
+        self._listen_local = threading.local()
+
+        super(PostgresStorage, self).__init__(name, create_tables=create_tables)
+
+    def _connect(self):
+        if self.connection is not None:
+            conn = self.connection()
+        else:
+            conn = psycopg.connect(self.dsn or '', **self.connection_params)
+        conn.autocommit = True
+        return conn
+    _create_connection = _connect
+
+    @property
+    def conn(self):
+        if self._conn is not None:
+            if self._conn_pid != os.getpid():
+                self._inherited.append(self._conn)
+                self._conn = None
+            elif self._conn.closed or self._conn.broken:
+                self._close_quiet(self._conn)
+                self._conn = None
+        if self._conn is None:
+            self._conn = self._connect()
+            self._conn_pid = os.getpid()
+        return self._conn
+
+    def _close_quiet(self, conn):
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    def close(self):
+        local = self._listen_local
+        conn = getattr(local, 'conn', None)
+        if conn is not None:
+            if local.pid == os.getpid():
+                self._close_quiet(conn)
+            else:
+                self._inherited.append(conn)
+            local.conn = None
+        return super(PostgresStorage, self).close()
+
+    def _listen_conn(self):
+        local = self._listen_local
+        conn = getattr(local, 'conn', None)
+        if conn is not None and (local.pid != os.getpid() or conn.closed or
+                                 conn.broken):
+            if local.pid != os.getpid():
+                self._inherited.append(conn)
+            else:
+                self._close_quiet(conn)
+            conn = local.conn = None
+        if conn is None:
+            conn = self._connect()
+            conn.execute('listen "%s"' % self.channel.replace('"', '""'))
+            local.conn, local.pid = conn, os.getpid()
+        return conn
+
+    def enqueue(self, data, priority=None):
+        with self.db(commit=True) as curs:
+            curs.execute('insert into {} (queue, data, priority) '
+                         'values (%s, %s, %s)'.format(self.table_task),
+                         (self.name, data, priority or 0))
+            curs.execute('select pg_notify(%s, %s)', (self.channel, ''))
+
+    def _dequeue(self):
+        with self.db() as curs:
+            curs.execute('delete from {t} where id = ('
+                         'select id from {t} where queue = %s '
+                         'order by priority desc, id limit 1 '
+                         'for update skip locked) '
+                         'returning data'.format(t=self.table_task),
+                         (self.name,))
+            row = curs.fetchone()
+        if row is not None:
+            return bytes(row[0])
+
+    def dequeue(self):
+        data = self._dequeue()
+        if data is not None or not self.blocking:
+            return data
+
+        conn = self._listen_conn()
+        deadline = time.monotonic() + self.read_timeout
+        while True:
+            timeout = deadline - time.monotonic()
+            if timeout <= 0:
+                return None
+            if not list(conn.notifies(timeout=timeout, stop_after=1)):
+                return None
+            data = self._dequeue()
+            if data is not None:
+                return data  # Otherwise another worker won, keep waiting.
+
+    def queue_size(self):
+        return self.sql('select count(*) from {} where queue = %s'.format(
+            self.table_task), (self.name,), results=True)[0][0]
+
+    def enqueued_items(self, limit=None):
+        sql = ('select data from {} where queue = %s '
+               'order by priority desc, id'.format(self.table_task))
+        params = (self.name,)
+        if limit is not None:
+            sql += ' limit %s'
+            params = (self.name, limit)
+
+        return [bytes(i) for i, in self.sql(sql, params, results=True)]
+
+    def flush_queue(self):
+        self.sql('delete from {} where queue = %s'.format(self.table_task),
+                 (self.name,))
+
+    def add_to_schedule(self, data, ts):
+        self.sql('insert into {} (queue, data, timestamp) '
+                 'values (%s, %s, %s)'.format(self.table_schedule),
+                 (self.name, data, ts.timestamp()))
+
+    def read_schedule(self, ts):
+        with self.db() as curs:
+            curs.execute('delete from {t} where id in ('
+                         'select id from {t} where queue = %s and '
+                         'timestamp <= %s for update skip locked) '
+                         'returning timestamp, id, data'.format(
+                             t=self.table_schedule),
+                         (self.name, ts.timestamp()))
+            rows = curs.fetchall()
+        return [bytes(data) for _, _, data in
+                sorted(rows, key=lambda row: row[:2])]
+
+    def schedule_size(self):
+        return self.sql('select count(*) from {} where queue = %s'.format(
+            self.table_schedule), (self.name,), results=True)[0][0]
+
+    def scheduled_items(self, limit=None):
+        sql = ('select data from {} where queue = %s '
+               'order by timestamp'.format(self.table_schedule))
+        params = (self.name,)
+        if limit is not None:
+            sql += ' limit %s'
+            params = (self.name, limit)
+
+        return [bytes(i) for i, in self.sql(sql, params, results=True)]
+
+    def flush_schedule(self):
+        self.sql('delete from {} where queue = %s'.format(
+            self.table_schedule), (self.name,))
+
+    def _key(self, key):
+        return key.decode('utf-8') if isinstance(key, bytes) else key
+
+    def put_data(self, key, value, is_result=False):
+        self.sql('insert into {} (queue, key, value) values (%s, %s, %s) '
+                 'on conflict (queue, key) do update set '
+                 'value = excluded.value'.format(self.table_kv),
+                 (self.name, self._key(key), value))
+
+    def peek_data(self, key):
+        res = self.sql('select value from {} where queue = %s and '
+                       'key = %s'.format(self.table_kv),
+                       (self.name, self._key(key)), results=True)
+        return bytes(res[0][0]) if res else EmptyData
+
+    def pop_data(self, key):
+        with self.db() as curs:
+            curs.execute('delete from {} where queue = %s and key = %s '
+                         'returning value'.format(self.table_kv),
+                         (self.name, self._key(key)))
+            row = curs.fetchone()
+        return bytes(row[0]) if row is not None else EmptyData
+
+    def has_data_for_key(self, key):
+        return bool(self.sql('select 1 from {} where queue = %s and '
+                             'key = %s'.format(self.table_kv),
+                             (self.name, self._key(key)), results=True))
+
+    def put_if_empty(self, key, value):
+        with self.db() as curs:
+            curs.execute('insert into {} (queue, key, value) '
+                         'values (%s, %s, %s) '
+                         'on conflict do nothing'.format(self.table_kv),
+                         (self.name, self._key(key), value))
+            return curs.rowcount == 1
+
+    def incr(self, key, amount=1):
+        with self.db() as curs:
+            curs.execute('insert into {t} as c (queue, key, value) '
+                         'values (%s, %s, %s) '
+                         'on conflict (queue, key) do update set '
+                         'value = c.value + excluded.value '
+                         'returning value'.format(t=self.table_counter),
+                         (self.name, self._key(key), amount))
+            return curs.fetchone()[0]
+
+    def delete_counter(self, key):
+        self.sql('delete from {} where queue = %s and key = %s'.format(
+            self.table_counter), (self.name, self._key(key)))
+
+    def result_store_size(self):
+        return self.sql('select count(*) from {} where queue = %s'.format(
+            self.table_kv), (self.name,), results=True)[0][0]
+
+    def result_items(self):
+        res = self.sql('select key, value from {} where queue = %s'.format(
+            self.table_kv), (self.name,), results=True)
+        return dict((k, bytes(v)) for k, v in res)
+
+    def flush_results(self):
+        self.sql('delete from {} where queue = %s'.format(self.table_kv),
+                 (self.name,))
+
+    def flush_counters(self):
+        self.sql('delete from {} where queue = %s'.format(
+            self.table_counter), (self.name,))
+
+
 class FileStorage(BaseStorage):
     """
     Simple file-system storage implementation.
@@ -1059,7 +1340,7 @@ class FileStorage(BaseStorage):
             os.makedirs(path)
 
     def enqueue(self, data, priority=None):
-        priority = priority or 0
+        priority = int(priority or 0)
         if priority < 0: raise ValueError('priority must be a positive number')
         if priority > self.MAX_PRIORITY:
             raise ValueError('priority must be <= %s' % self.MAX_PRIORITY)

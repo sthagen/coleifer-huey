@@ -3,6 +3,95 @@ Changelog
 
 ## master
 
+* Add `retry_backoff` parameter to `task()` and `periodic_task()`. The first
+  retry waits `retry_delay` seconds and each subsequent delay is multiplied by
+  `retry_backoff`, giving exponentially-growing waits between retries.
+* Fix `create_tables=False`, which crashed `SqliteHuey` at connect and was
+  silently ignored by the peewee `SqlHuey`. `SqlStorage` also gains
+  `initialize_schema()` so the `create_huey_tables` command supports it.
+* Accept float priorities in `FileStorage` by truncating to int. Previously
+  they raised a TypeError.
+* Raise `ResultTimeout` from blocking `Result.get()` when the wait ends w/o an
+  obtainable result, e.g. a dropped connection. Previously the internal
+  `EmptyData` sentinel could be returned.
+* Preserve per-call `retry_backoff` when a task is rescheduled via
+  `Result.reschedule()`.
+* Clear revocations that arrive mid-execution w/ a delete, so the clear also
+  works on `RedisExpireHuey` where destructive reads do not remove data.
+* Fix an off-by-one in the redis `scheduled_items()` that returned limit+1
+  items.
+* Reconnect stale connections in the `SqlHuey` counter methods, which run in
+  the consumer via chords and rate limits.
+* Return the lock from `TaskLock.__enter__()`, so
+  `with huey.lock_task('x') as lock:` binds the lock instead of None.
+* Defer the redis server version check to first use. Previously every storage
+  init issued an INFO round-trip.
+* Remove the undocumented Kyoto Tycoon storage backend, its tests, and the
+  ukt CI dependency.
+* Remove the djhuey `backend_class` alias for `huey_class` (deprecated since
+  2.0) and the Django <1.2 `settings.DATABASE_NAME` queue-name fallback.
+* Fire the chord callback when a pipelined member dies before its tail. A
+  failed, revoked, or expired stage now contributes for the member, where
+  previously the chord counter stayed short and the callback never ran.
+
+[View commits](https://github.com/coleifer/huey/compare/3.2.1...master)
+
+## 3.2.1
+
+* Add a Django admin dashboard for task statistics. Adding
+  `huey.contrib.djhuey.stats` to `INSTALLED_APPS` starts the
+  `huey.contrib.stats` recorder in every process (incl. the consumer) and adds
+  a Huey section to the admin: a dashboard w/ the same live stats and controls
+  as the flask-peewee panel, plus a filterable event log. Stats are stored via
+  peewee in the default Django database and require no migrations.
+
+[View commits](https://github.com/coleifer/huey/compare/3.2.0...3.2.1)
+
+## 3.2.0
+
+* Add `store_intermediate_errors` option (default true, preserving current
+  behavior). When false, a task that fails with retries remaining no longer
+  writes its exception to the result store or runs its `on_error` handler until
+  the retries are exhausted, so a blocking `Result.get()` waits for the *final*
+  outcome instead of raising on the first failed attempt.
+* Add `create_tables` option to the SQL storage backends (default true). Pass
+  `create_tables=False` to skip the automatic `create table if not exists` at
+  init, e.g. to manage huey's schema via Django migrations rather than have
+  every web worker attempt DDL on import.
+* Add a `create_huey_tables` Django management command to create the tables when
+  `create_tables=False`.
+* Fix `on_error` handlers accumulating one exception argument per failed attempt
+  across retries. Handlers now receives only the current attempt's exception.
+* Add `huey.contrib.stats`, a task-statistics engine: `enable_stats(huey, db)`
+  records task signals into two peewee tables (`huey_event`, `huey_inflight`)
+  and exposes a `HueyStats` query API for throughput, per-task timing,
+  error-rates, in-flight and recent-event views. Depends only on peewee, so it
+  can back a custom dashboard or exporter. Enable it in the consumer to capture
+  task execution.
+* Add a Flask-Peewee admin panel, `huey.contrib.flask_admin.HueyPanel`,
+  registered w/ `admin.register_panel('Huey', HueyPanel, huey)`. It renders the
+  recorded stats as a dashboard card plus a standalone page with live queue
+  depths, throughput, per-task stats, running tasks and recent events. Has
+  controls to revoke/restore tasks and flush the queue, schedule, results or
+  locks. Requires flask-peewee 4.0.1+.
+
+[View commits](https://github.com/coleifer/huey/compare/3.1.1...3.2.0)
+
+## 3.1.1
+
+* Ensure we use a safe name for long postgres queue names. PG has a 63 byte
+  limit on the channel name.
+* Ensure recycled worker threads no longer leak their LISTEN connections
+  w/Postgres.
+
+[View commits](https://github.com/coleifer/huey/compare/3.1.0...3.1.1)
+
+## 3.1.0
+
+* Add first-class Postgres support: `PostgresHuey`. Workers use LISTEN/NOTIFY
+  when a task is enqueued, giving Redis-like dequeue latency without polling,
+  and dequeues use `select ... for update skip locked` so any number of
+  consumers can share one database (requires psycopg 3.2+).
 * The django.tasks backend is now also compatible with the `django-tasks`
   backport package, extending support to pre-6.0 Django.
 * Use an explicit `fork` multiprocessing context for process workers, rather
@@ -11,7 +100,7 @@ Changelog
   the `huey_consumer` console-script or a programmatic
   `create_consumer().run()`.
 
-[View commits](https://github.com/coleifer/huey/compare/3.0.3...master)
+[View commits](https://github.com/coleifer/huey/compare/3.0.3...3.1.0)
 
 ## 3.0.3
 
@@ -23,11 +112,11 @@ Changelog
 
 ## 3.0.2
 
-* Redis blocking dequeue no longer swallows `ConnectionError` -- the error
+* Redis blocking dequeue no longer swallows `ConnectionError`: the error
   propagates to the worker, which logs it and applies exponential backoff.
   Previously a downed redis server caused workers to busy-loop silently.
 * Chord callbacks now fire when a member task is revoked, expired or cancelled
-  by a pre-execute hook -- the skipped member contributes a `None` placeholder
+  by a pre-execute hook. The skipped member contributes a `None` placeholder
   result. Previously the callback was silently lost.
 * Scheduler skips missed periodic checks after a stall (e.g. suspend/resume)
   instead of running them back-to-back, which enqueued duplicate periodic
@@ -42,7 +131,7 @@ Changelog
 * Process-worker task timeouts use `signal.setitimer()`, so float / sub-second
   timeouts work. Previously a timeout less than 1 second was silently ignored
   (`alarm(0)` cancels the timer) and fractional seconds were truncated.
-* Consumer signal handlers only set flags -- logging and greenlet cleanup now
+* Consumer signal handlers only set flags. Logging and greenlet cleanup now
   happen in the main loop, avoiding re-entrant I/O from signal context.
 * A user-supplied task kwarg named `task` is no longer dropped during
   serialization. Context tasks (`context=True`) inject the task instance into
@@ -52,7 +141,7 @@ Changelog
 * `normalize_time()` treats `delay=0` as "now" rather than ignoring it, so
   e.g. `expires=0` means "expires immediately" instead of "never expires".
 * Redis `enqueued_items(limit)` returned `limit + 1` items from the producer
-  end of the queue; it now returns the next-`limit` items to be dequeued,
+  end of the queue. It now returns the next-`limit` items to be dequeued,
   matching the other storage backends.
 * Redis-dependent tests are skipped when no local redis server is reachable,
   instead of failing at import time.

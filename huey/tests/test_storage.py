@@ -3,7 +3,7 @@ import hashlib
 import itertools
 import os
 import shutil
-import sys
+import sqlite3
 import threading
 import unittest
 import uuid
@@ -24,14 +24,10 @@ from huey.api import RedisHuey
 from huey.api import SqliteHuey
 from huey.api import chord
 from huey.constants import EmptyData
-from huey.consumer import Consumer
 from huey.exceptions import ConfigurationError
-from huey.exceptions import ResultTimeout
 from huey.storage import FileStorage
-from huey.storage import MemoryStorage
-from huey.storage import RedisExpireStorage
 from huey.tests.base import BaseTestCase
-from huey.tests.base import TRAVIS
+from huey.tests.base import CI
 from huey.tests.base import slow_test
 
 
@@ -66,6 +62,9 @@ class StorageTests(object):
         for i in range(3):
             self.s.enqueue(b'item-%d' % i)
 
+        # A limit returns exactly the next-N items to be dequeued.
+        self.assertEqual(self.s.enqueued_items(2), [b'item-0', b'item-1'])
+
         # Remove two items (this API is not used, but we'll test it anyways).
         self.assertEqual(self.s.dequeue(), b'item-0')
         self.assertEqual(self.s.queue_size(), 2)
@@ -94,6 +93,9 @@ class StorageTests(object):
             self.s.add_to_schedule(data, ts)
 
         self.assertEqual(self.s.schedule_size(), 4)
+
+        # A limit returns exactly limit items, soonest first.
+        self.assertEqual(self.s.scheduled_items(2), [b'n1', b'p0'])
 
         # Read from the schedule up-to the "p0" timestamp.
         sched = self.s.read_schedule(timestamp)
@@ -291,7 +293,7 @@ class TestRedisExpireStorage(StorageTests, BaseTestCase):
         self.assertEqual(conn.ttl(self.s.result_key(b'k1')), -1)
         self.assertTrue(3580 <= conn.ttl(self.s.result_key(b'k2')) <= 3600)
 
-        # Non-existant keys return -2. See redis docs for TTL command.
+        # Non-existent keys return -2. See redis docs for TTL command.
         self.assertEqual(conn.ttl(self.s.result_key(b'k3')), -2)
 
         # Non-expired keys return -1.
@@ -434,6 +436,17 @@ class TestSqliteStorage(StorageTests, BaseTestCase):
     def get_huey(self):
         return SqliteHuey(filename='huey_storage.db', timeout=3)
 
+    def test_create_tables(self):
+        huey = SqliteHuey(filename='huey_ct.db', create_tables=False)
+        try:
+            self.assertRaises(sqlite3.OperationalError, huey.pending_count)
+            huey.storage.initialize_schema()
+            self.assertEqual(huey.pending_count(), 0)
+        finally:
+            huey.storage.close()
+            if os.path.exists('huey_ct.db'):
+                os.unlink('huey_ct.db')
+
     def test_timeout(self):
         self.assertEqual(self.s._timeout, 3)
         curs = self.s.conn.execute('pragma busy_timeout')
@@ -449,6 +462,13 @@ class TestFileStorageMethods(StorageTests, BaseTestCase):
         super(TestFileStorageMethods, self).tearDown()
         if os.path.exists(self.path):
             shutil.rmtree(self.path)
+
+    def test_float_priority(self):
+        # Fractional priorities are truncated rather than raising.
+        self.s.enqueue(b'low', priority=1.5)
+        self.s.enqueue(b'high', priority=2.5)
+        self.assertEqual(self.s.dequeue(), b'high')
+        self.assertEqual(self.s.dequeue(), b'low')
 
     def get_huey(self):
         return Huey('test-file-storage', storage_class=FileStorage,
@@ -532,7 +552,7 @@ class TestFileStorageMethods(StorageTests, BaseTestCase):
         for i in range(nthreads * ntasks):
             self.assertEqual(in_q.get(), out_q.get())
 
-    @unittest.skipIf(TRAVIS, 'skipping test that is flaky on travis-ci')
+    @unittest.skipIf(CI, 'skipping test that is flaky on CI')
     def test_consumer_integration(self):
         return super(TestFileStorageMethods, self).test_consumer_integration()
 

@@ -3,6 +3,8 @@
 Django
 ------
 
+.. image:: django-admin.png
+
 Huey comes with special integration for use with the Django framework. The
 integration provides:
 
@@ -12,13 +14,10 @@ integration provides:
 4. Properly manage database connections.
 5. A :ref:`backend <django-task>` for the ``django.tasks`` framework (Django
    6.0 and newer, or older Djangos using the django-tasks backport).
+6. Optional :ref:`Admin integration <django-admin-stats>` for visibility and
+   managing your Huey queue.
 
 Supported Django versions are those officially supported at https://www.djangoproject.com/download/#supported-versions
-
-.. note::
-   For multiple-queue support, check out `gaiacoop/django-huey <https://github.com/gaiacoop/django-huey>`_.
-   For a discussion of when multiple queues are useful (and when task
-   priorities are the simpler answer), see :ref:`recipe-multiple-queues`.
 
 Setting things up
 ^^^^^^^^^^^^^^^^^
@@ -93,6 +92,8 @@ The following ``huey_class`` implementations are provided out-of-the-box:
   keys automatically if results are not read and supports priority.
 * ``huey.SqliteHuey`` - uses Sqlite, full support for task priorities. Accepts
   a ``filename`` parameter for the path to the database file.
+* ``huey.PostgresHuey`` - uses Postgres, full support for task priorities. See
+  :ref:`django-postgres` for connection and schema configuration.
 * ``huey.FileHuey`` - uses filesystem for storage. Accepts a ``path`` parameter
   for the base storage directory.
 
@@ -102,12 +103,81 @@ shown how you can create a connection pool:
 
 .. code-block:: python
 
-    # settings.py -- alternative configuration method
+    # settings.py: alternative configuration method
     from huey import RedisHuey
     from redis import ConnectionPool
 
     pool = ConnectionPool(host='my.redis.host', port=6379, max_connections=20)
     HUEY = RedisHuey('my-app', connection_pool=pool)
+
+.. _django-postgres:
+
+Using Postgres for storage
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:py:class:`PostgresHuey` lets you use your existing Postgres database as the
+task queue, schedule and result store (``pip install huey[postgres]``). Two
+integration points are worth calling out for Django users.
+
+Schema creation
+"""""""""""""""
+
+By default the storage backend issues ``create table if not exists`` for its
+tables when it is instantiated. Because ``settings.HUEY`` is evaluated at import
+time, that means every process importing ``huey.contrib.djhuey`` (including
+your web workers) will connect and attempt to create the tables, which
+requires the ``CREATE`` privilege and clashes with a migrations-managed schema.
+
+Pass ``create_tables=False`` to disable the automatic DDL and create the tables
+once, explicitly, using the ``create_huey_tables`` management command:
+
+.. code-block:: python
+
+    # settings.py
+    HUEY = {
+        'huey_class': 'huey.PostgresHuey',
+        'create_tables': False,
+        'connection': {'dsn': 'postgresql:///my_db'},
+    }
+
+.. code-block:: shell
+
+    ./manage.py create_huey_tables
+
+Reusing the Django database configuration
+"""""""""""""""""""""""""""""""""""""""""
+
+Rather than duplicating your credentials in ``settings.HUEY``, you can point the
+storage at the same database Django uses by passing a ``connection`` callable.
+The callable must return a **new**, dedicated ``psycopg`` connection. Do not
+hand back ``django.db.connection``. Huey enables autocommit on the connection
+and holds a long-lived one open for ``LISTEN``, neither of which is compatible
+with Django's per-request connection or its transaction handling.
+
+.. code-block:: python
+
+    # settings.py
+    import psycopg
+    from django.conf import settings
+
+    def huey_connection():
+        db = settings.DATABASES['default']
+        return psycopg.connect(
+            dbname=db['NAME'],
+            user=db.get('USER') or None,
+            password=db.get('PASSWORD') or None,
+            host=db.get('HOST') or None,
+            port=db.get('PORT') or None)
+
+    HUEY = {
+        'huey_class': 'huey.PostgresHuey',
+        'create_tables': False,
+        'connection': {'connection': huey_connection},
+    }
+
+To ensure a task is not enqueued until the surrounding transaction commits (for
+example, when it references a row created in the same view), use
+:py:func:`on_commit_task` as described in :ref:`django-transactions`.
 
 Running the Consumer
 ^^^^^^^^^^^^^^^^^^^^
@@ -239,6 +309,8 @@ automatically close the connection for you.
     def every_five_mins():
         # This is a periodic task that executes queries.
 
+.. _django-transactions:
+
 Enqueueing After Commit
 ^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -307,6 +379,64 @@ identifier names:
 
     Enqueue the decorated function for execution after the transaction commits.
     If no transaction is active, task will be enqueued immediately.
+
+
+.. _django-admin-stats:
+
+Admin dashboard
+^^^^^^^^^^^^^^^
+
+Huey can record task statistics (see :ref:`task-stats`) and surface them in
+the Django admin. Enable it by adding the stats app to ``INSTALLED_APPS``:
+
+.. code-block:: python
+
+    INSTALLED_APPS = [
+        # ...
+        'huey.contrib.djhuey',
+        'huey.contrib.djhuey.stats',
+    ]
+
+That is the whole setup. The app starts the stats recorder in every process
+at start-up, including the consumer (``run_huey`` is a management command),
+so both enqueue and execution events are captured with no further
+configuration. The recorder uses `peewee <https://docs.peewee-orm.com/>`_ for
+storage, creating its tables automatically in ``DATABASES['default']`` (there
+are no migrations to run) and pruning old rows as new events are written.
+
+The admin index gets a *Huey* section with two entries:
+
+* **Dashboard**: live queue depths, a throughput chart, per-task statistics,
+  currently-running tasks and recent events, refreshed every 5 seconds, with
+  controls to revoke/restore tasks and flush the queue, schedule, results or
+  locks.
+* **Events**: a filterable, searchable log of the raw signal events.
+
+Options may be provided via a ``HUEY_STATS`` setting:
+
+.. code-block:: python
+
+    HUEY_STATS = {
+        'retention_hours': 48,   # Prune events older than this.
+        'max_events': 2000,      # Cap on rows retained per queue.
+        'capture_args': False,   # Store a truncated repr of task arguments.
+
+        # Stats are stored in DATABASES['default'] by default. Override with
+        # a peewee Database instance or db-url string:
+        #'database': 'sqlite:///huey-stats.db',
+    }
+
+.. note::
+    If ``HUEY_STATS['database']`` points somewhere other than the default
+    Django database, the dashboard works as usual but the *Events* changelist
+    (which reads through the Django ORM) will not find the tables.
+
+.. note::
+    The dashboard's *Registered tasks* table lists the tasks known to the
+    **web** process. ``run_huey`` autodiscovers each app's ``tasks`` module
+    but the web server does not, so import your tasks from your app's
+    ``AppConfig.ready()`` to make them visible (see
+    ``examples/django_ex``).
 
 
 .. _django-task:

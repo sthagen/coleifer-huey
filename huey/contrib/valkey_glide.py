@@ -40,7 +40,12 @@ class ValkeyGlideStorage(RedisStorage):
         self.queue_key = 'huey.redis.%s' % self.name
         self.schedule_key = 'huey.schedule.%s' % self.name
         self.result_key = 'huey.results.%s' % self.name
-        self.error_key = 'huey.errors.%s' % self.name
+        self.counter_key = 'huey.counters.%s' % self.name
+        # Result notification uses a blocking BLPOP, which glide does not
+        # support well -- fall back to polling for results.
+        self.notify_prefix = 'huey.notify.%s.' % self.name
+        self.notify_result = False
+        self.notify_result_ttl = None
 
         if client_name is not None:
             self.conn.client_setname(client_name)
@@ -72,8 +77,8 @@ class ValkeyGlideStorage(RedisStorage):
         return [] if tasks is None else [base64.b64decode(t) for t in tasks]
 
     def scheduled_items(self, limit=None):
-        limit = limit or -1
-        tasks = self.conn.zrange(self.schedule_key, RangeByIndex(0, limit))
+        stop = limit - 1 if limit else -1
+        tasks = self.conn.zrange(self.schedule_key, RangeByIndex(0, stop))
         return [base64.b64decode(t) for t in tasks]
 
     def put_data(self, key, value, is_result=False):
@@ -102,6 +107,12 @@ class ValkeyGlideStorage(RedisStorage):
 
     def flush_results(self):
         self.conn.delete([self.result_key])
+
+    def delete_counter(self, key):
+        self.conn.hdel(self.counter_key, [key])
+
+    def flush_counters(self):
+        self.conn.delete([self.counter_key])
 
 
 class ValkeyGlideHuey(RedisHuey):

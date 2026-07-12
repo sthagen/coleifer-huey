@@ -138,6 +138,44 @@ Implementations of :py:class:`Huey` which handle task and result persistence.
 
     .. seealso:: :py:class:`SqliteStorage`
 
+.. py:class:: PostgresHuey
+
+    :py:class:`Huey` that utilizes PostgreSQL for queue, schedule and result
+    storage. Requires `psycopg <https://www.psycopg.org/>`_ 3.2 or newer
+    (``pip install huey[postgres]``).
+
+    Workers use ``LISTEN``/``NOTIFY`` for low-latency dequeue without
+    polling. The worker polls once before waiting and polls again when the
+    wait times out, so a missed notification delays a task by at most
+    ``read_timeout`` seconds and can never lose one.
+
+    Commonly-used keyword arguments for storage configuration:
+
+    :param str dsn: connection string or URL, e.g.
+        ``postgresql://user:pass@host:5432/dbname``. Alternatively, discrete
+        connection parameters (``host``, ``port``, ``dbname``, ``user``,
+        ``password``, etc.) may be given as additional keyword arguments,
+        which are passed directly to ``psycopg.connect()``.
+    :param connection: zero-argument callable returning a new ``psycopg``
+        connection, to integrate with the application's own connection
+        machinery. Huey manages the lifetime of the connections it obtains.
+    :param bool blocking: wake workers using LISTEN/NOTIFY (default true).
+        Set to false to fall back to polling, e.g. when connecting through
+        PgBouncer in transaction-pooling mode, which breaks LISTEN.
+    :param read_timeout: maximum seconds a blocking dequeue waits before the
+        worker loops and polls again. Default is 1 second.
+    :param str table_prefix: prefix for the four tables huey creates
+        (``<prefix>_task``, ``<prefix>_schedule``, ``<prefix>_kv``,
+        ``<prefix>_counter``). Default is ``huey``. Tables are created
+        automatically if they do not exist.
+
+    Each worker thread or process maintains one additional connection used
+    for LISTEN, so a consumer with N workers holds N+1 connections.
+
+    PostgresHuey fully supports task priorities.
+
+    .. seealso:: :py:class:`PostgresStorage`
+
 .. py:class:: MemoryHuey
 
     :py:class:`Huey` that uses in-memory storage. Only should be used when
@@ -174,14 +212,19 @@ Implementations of :py:class:`Huey` which handle task and result persistence.
 Huey object
 -----------
 
-.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, storage_kwargs)
+.. py:class:: Huey(name='huey', results=True, store_none=False, utc=True, immediate=False, serializer=None, compression=False, use_zlib=False, immediate_use_memory=True, store_intermediate_errors=True, storage_kwargs)
 
     :param str name: the name of the task queue, e.g. your application's name.
     :param bool results: whether to store task results.
     :param bool store_none: whether to store ``None`` in the result store.
+    :param bool store_intermediate_errors: when a task fails but has retries
+        remaining, store the intermediate exception in the result store and run
+        any ``on_error`` handler. When ``False``, the error is withheld until the
+        task's retries are exhausted. Defaults to ``True`` for backwards
+        compatibility. See :ref:`store-intermediate-errors`.
     :param bool utc: use UTC internally, convert naive datetimes from local
         time to UTC (if local time is other than UTC).
-    :param bool immediate: useful for debugging; causes tasks to be executed
+    :param bool immediate: useful for debugging, causes tasks to be executed
         synchronously in the application.
     :param Serializer serializer: serializer implementation for tasks and
         result data. The default implementation uses ``pickle``.
@@ -196,7 +239,7 @@ Huey object
     call to be enqueued for execution by the consumer.
 
     Typically your application will only need one Huey instance, but you can
-    have as many as you like -- the only caveat is that one consumer process
+    have as many as you like. The only caveat is that one consumer process
     must be executed for each Huey instance.
 
     Example usage:
@@ -297,11 +340,15 @@ Huey object
             # ... later ...
             consumer.stop(graceful=True)
 
-    .. py:method:: task(retries=0, retry_delay=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
+    .. py:method:: task(retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
 
         :param int retries: number of times to retry the function if an
             unhandled exception occurs when it is executed.
         :param int retry_delay: number of seconds to wait between retries.
+        :param retry_backoff: multiplier applied to the delay after each failed
+            attempt, giving exponentially-growing waits between retries. The
+            first retry waits ``retry_delay`` seconds. See
+            :ref:`recipe-exponential-backoff`.
         :param int priority: priority assigned to task, higher numbers are
             processed first by the consumer when there is a backlog. See
             :ref:`priority` (requires a storage backend with priority
@@ -380,7 +427,7 @@ Huey object
         revocation, etc.), see :py:class:`TaskWrapper`, :py:class:`Task`,
         and :py:class:`Result`.
 
-    .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
+    .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
 
         :param function validate_datetime: function which accepts a
             ``datetime`` instance and returns whether the task should be
@@ -388,6 +435,8 @@ Huey object
         :param int retries: number of times to retry the function if an
             unhandled exception occurs when it is executed.
         :param int retry_delay: number of seconds to wait in-between retries.
+        :param retry_backoff: multiplier applied to the delay after each failed
+            attempt. See :py:meth:`~Huey.task`.
         :param int priority: priority assigned to task, higher numbers are
             processed first by the consumer when there is a backlog. See
             :ref:`priority` (requires a storage backend with priority
@@ -418,7 +467,7 @@ Huey object
         helper (described below). The consumer checks once per minute whether
         the function should run.
 
-        Example — execute every three hours, on the hour:
+        Example, executing every three hours, on the hour:
 
         .. code-block:: python
 
@@ -524,7 +573,7 @@ Huey object
             @huey.pre_execute()
             def my_pre_execute_hook(task):
                 if datetime.datetime.now().weekday() == 6:
-                    raise CancelExecution('Sunday -- no work will be done.')
+                    raise CancelExecution('Sunday, no work will be done.')
 
     .. py:method:: unregister_pre_execute(name_or_fn)
 
@@ -868,13 +917,13 @@ Huey object
 
         .. code-block:: python
 
-            # Decorator form — automatically discovered:
+            # Decorator form, automatically discovered:
             @huey.periodic_task(crontab(minute='*/5'))
             @huey.lock_task('reports-lock')
             def generate_report():
                 run_report()
 
-            # Context-manager form — NOT automatically discovered:
+            # Context-manager form, NOT automatically discovered:
             @huey.task()
             def backup():
                 with huey.lock_task('db-backup'):
@@ -1131,7 +1180,7 @@ Huey object
         execute again until :py:meth:`TaskWrapper.restore` is called.
 
         This function can be called multiple times, but each call will
-        supercede any restrictions from the previous revocation.
+        supersede any restrictions from the previous revocation.
 
         .. code-block:: python
 
@@ -2235,7 +2284,7 @@ Huey comes with several built-in storage implementations:
     :param str filename: sqlite database filename.
     :param int cache_mb: sqlite page-cache size in megabytes.
     :param bool fsync: if enabled, all writes to the Sqlite database will be
-        synchonized. This provides greater safety from database corruption in
+        synchronized. This provides greater safety from database corruption in
         the event of sudden power-loss.
     :param str journal_mode: sqlite journaling mode to use. Defaults to using
         write-ahead logging, which enables readers to coexist with a single
@@ -2248,6 +2297,36 @@ Huey comes with several built-in storage implementations:
         were enqueued.
     :param kwargs: Additional keyword arguments passed to the ``sqlite3``
         connection constructor.
+
+
+.. py:class:: PostgresStorage(name='huey', dsn=None, connection=None, blocking=True, read_timeout=1, table_prefix='huey', create_tables=True, **connection_params)
+
+    :param str dsn: connection string or URL for ``psycopg.connect()``.
+    :param connection: zero-argument callable returning a new ``psycopg``
+        connection.
+    :param bool blocking: use LISTEN/NOTIFY to block on dequeue rather than
+        polling. Default is true.
+    :param read_timeout: timeout to use when performing a blocking dequeue,
+        default is 1 second.
+    :param str table_prefix: prefix for huey's tables, default ``huey``.
+    :param bool create_tables: issue ``create table if not exists`` for huey's
+        tables when the storage is instantiated. Default is true. Set to false
+        to manage the schema yourself, e.g. via Django migrations or the
+        ``create_huey_tables`` management command.
+    :param connection_params: additional keyword arguments passed directly to
+        ``psycopg.connect()``.
+
+    Requires psycopg 3.2 or newer. Dequeues use ``select ... for update skip locked``,
+    so any number of consumers can safely share one database.
+
+    .. note::
+        PgBouncer in transaction-pooling mode does not support LISTEN. Either
+        use session pooling or a direct connection for huey, or specify
+        ``blocking=False`` to use polling instead.
+
+    .. note::
+        When using the greenlet worker model, install psycopg in pure-Python
+        mode (the C extension bypasses the sockets patched by gevent).
 
 
 .. py:class:: FileStorage(name, path, levels=2, use_thread_lock=False)

@@ -14,16 +14,13 @@ from huey.api import crontab
 from huey.api import group
 from huey.constants import EmptyData
 from huey.exceptions import CancelExecution
-from huey.exceptions import ConfigurationError
 from huey.exceptions import RateLimitExceeded
 from huey.exceptions import ResultTimeout
 from huey.exceptions import RetryTask
 from huey.exceptions import TaskException
-from huey.exceptions import TaskLockedException
 from huey.exceptions import TaskTimeout
 from huey.serializer import SignedSerializer
 from huey.tests.base import BaseTestCase
-from huey.utils import Error
 
 
 class TestError(Exception):
@@ -487,6 +484,24 @@ class TestQueue(BaseTestCase):
         self.assertEqual(len(self.huey), 0)
         self.assertEqual(self.huey.result_count(), 0)
         self.assertEqual(self.huey.scheduled_count(), 0)
+
+        # Per-call retry settings, including backoff, are preserved.
+        r2 = task_a.schedule((3,), delay=60, retries=2, retry_delay=5,
+                             retry_backoff=4)
+        rs2 = r2.reschedule(delay=120)
+        new_task = [t for t in self.huey.pending() if t.id == rs2.id][0]
+        self.assertEqual(new_task.retries, 2)
+        self.assertEqual(new_task.retry_delay, 5)
+        self.assertEqual(new_task.retry_backoff, 4)
+
+    def test_blocking_result_no_sentinel_leak(self):
+        # A wait that ends without an obtainable result, e.g. read by another
+        # caller or a dropped connection, raises rather than surfacing the
+        # internal EmptyData sentinel.
+        self.huey.storage.wait_result = lambda *a, **kw: True
+        result = Result(self.huey, Task(id='tx'))
+        self.assertRaises(ResultTimeout,
+                          lambda: result.get(blocking=True))
 
     def test_reschedule_no_delay(self):
         state = []
@@ -968,6 +983,40 @@ class TestQueue(BaseTestCase):
 
         dt = datetime.datetime.now() + datetime.timedelta(seconds=61)
         self.assertTrue(self.huey.ready_to_run(task, dt))
+
+    def test_retry_backoff(self):
+        @self.huey.task(retries=3, retry_delay=2, retry_backoff=2)
+        def task_a():
+            raise ValueError('try again')
+
+        r = task_a()
+        self.assertTrue(self.execute_next() is None)
+        self.trap_exception(r)
+
+        seconds = lambda s: (datetime.datetime.now() +
+                             datetime.timedelta(seconds=s))
+
+        # The first retry is scheduled using the given retry_delay, after
+        # which the delay is multiplied by retry_backoff. The waits between
+        # attempts are 2, 4 and 8 seconds, and the grown retry_delay is
+        # serialized with the task along with the decremented retries.
+        for retries, delay, wait in ((2, 4, 2), (1, 8, 4), (0, 16, 8)):
+            task, = self.huey.scheduled()
+            self.assertEqual(task.retries, retries)
+            self.assertEqual(task.retry_delay, delay)
+            self.assertEqual(task.retry_backoff, 2)
+            self.assertTrue(seconds(wait - 2) < task.eta <= seconds(wait))
+
+            self.huey.storage.flush_schedule()
+            self.assertTrue(self.huey.execute(task, task.eta) is None)
+
+        # Retries are exhausted, nothing further is scheduled.
+        self.assertEqual(self.huey.scheduled_count(), 0)
+        self.assertEqual(len(self.huey), 0)
+
+        # The backoff multiplier can also be given when enqueueing.
+        t = task_a.s(retry_backoff=3)
+        self.assertEqual(t.retry_backoff, 3)
 
     def test_retrytask_eta_delay(self):
         @self.huey.task(retry_delay=10)
@@ -1816,7 +1865,7 @@ class TestChordPrimitive(BaseTestCase):
         self.assertTrue(self.execute_next() is None)  # retry.
         self.assertEqual(len(self.huey), 2)  # err cb, chord cb.
         self.assertEqual(self.execute_next(), 99)  # err cb fired again.
-        self.assertEqual(state, [1, 2])  # err cb records both errors.
+        self.assertEqual(state, [1, 1])  # Each attempt's handler gets one error.
         self.assertEqual(self.execute_next(), -1)  # chord cb (err).
         self.assertEqual(r(), -1)
 
@@ -1907,6 +1956,61 @@ class TestChordPrimitive(BaseTestCase):
         result = r()
         self.assertTrue(isinstance(result[0], TestError))
         self.assertTrue(isinstance(result[1], TestError))
+
+    def test_chord_pipeline_member_head_fails(self):
+        @self.huey.task()
+        def step1(n):
+            raise TestError('step1 fail')
+
+        @self.huey.task()
+        def step2(n):
+            return n * 2
+
+        @self.huey.task()
+        def combine(results):
+            return results
+
+        c = chord([step1.s(1).then(step2), step1.s(2).then(step2)],
+                  combine.s())
+        r = self.huey.enqueue(c)
+
+        # The heads fail and their step2 tails are never enqueued, but each
+        # dead head contributes its exception for the member.
+        self.execute_next()
+        self.execute_next()
+
+        self.assertEqual(len(self.huey), 1)
+        self.execute_next()
+
+        result = r()
+        self.assertTrue(isinstance(result[0], TestError))
+        self.assertTrue(isinstance(result[1], TestError))
+
+    def test_chord_pipeline_member_head_revoked(self):
+        @self.huey.task()
+        def step1(n):
+            return n
+
+        @self.huey.task()
+        def step2(n):
+            return n * 2
+
+        @self.huey.task()
+        def combine(results):
+            return results
+
+        m1 = step1.s(1).then(step2)
+        m2 = step1.s(2).then(step2)
+        r = self.huey.enqueue(chord([m1, m2], combine.s()))
+
+        self.huey.revoke(m1)  # Revoke the head of the first member.
+        self.assertTrue(self.execute_next() is None)  # Revoked, not run.
+        self.assertEqual(self.execute_next(), 2)
+        self.assertEqual(self.execute_next(), 4)
+
+        self.assertEqual(len(self.huey), 1)
+        self.assertEqual(self.execute_next(), [None, 4])
+        self.assertEqual(r(), [None, 4])
 
     def test_chord_ordering(self):
         @self.huey.task()
@@ -2225,6 +2329,39 @@ class TestTaskChaining(BaseTestCase):
         self.assertEqual(self.execute_next(), 1337)
         self.assertEqual(state, ['TestError(0)'])
 
+    def test_error_callback_retries(self):
+        # With store_intermediate_errors (the default), the on_error handler is
+        # enqueued on every failed attempt -- including those with retries
+        # remaining -- and the intermediate error is written to the result store
+        # each time. Each invocation receives only its own attempt's exception,
+        # so a fixed-arity handler does not accumulate arguments across retries.
+        state = []
+        @self.huey.task(retries=1)
+        def task_a():
+            raise TestError('boom')
+
+        @self.huey.task()
+        def task_e(err):
+            state.append(repr(err))
+
+        self.huey.enqueue(task_a.s().error(task_e))
+
+        # First attempt fails with a retry remaining: on_error is enqueued and
+        # the task is also re-enqueued.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 2)
+        self.assertEqual(self.huey.result_count(), 1)  # Intermediate error.
+        self.execute_next()  # Run the first on_error handler.
+
+        # Final attempt exhausts retries: on_error is enqueued a second time.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 1)
+        self.execute_next()  # Run the second on_error handler.
+
+        # The handler ran once per failed attempt, each with a single exception.
+        self.assertEqual(state, ['TestError(boom)', 'TestError(boom)'])
+        self.assertEqual(len(self.huey), 0)
+
     def test_pipeline_error_midway(self):
         @self.huey.task()
         def task_a(n):
@@ -2311,7 +2448,8 @@ class TestTaskLocking(BaseTestCase):
         self.assertEqual(self.execute_next(), 4)
 
         task_a(4)
-        with self.huey.lock_task('lock_x'):
+        with self.huey.lock_task('lock_x') as lock:
+            self.assertTrue(lock.is_locked())
             self.assertFalse(self.huey.is_locked('lock_a'))
             self.assertTrue(self.huey.is_locked('lock_x'))
             self.assertEqual(self.execute_next(), 5)
@@ -2592,6 +2730,82 @@ class TestDisableResultStore(BaseTestCase):
 
         self.assertEqual(len(self.huey), 0)
         self.assertEqual(self.huey.result_count(), 0)
+
+
+class TestStoreIntermediateErrors(BaseTestCase):
+    def get_huey(self):
+        return MemoryHuey(utc=False, store_intermediate_errors=False)
+
+    def test_intermediate_error_withheld(self):
+        @self.huey.task(retries=1)
+        def task_a():
+            raise TestError('boom')
+
+        r = task_a()
+
+        # First attempt fails with a retry remaining: nothing is written to the
+        # result store and the task is simply re-enqueued.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 1)
+        self.assertEqual(self.huey.result_count(), 0)
+        self.assertTrue(r.get() is None)
+
+        # Final attempt fails with retries exhausted: now the error is stored
+        # and surfaced to the caller.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 0)
+        self.assertEqual(self.huey.result_count(), 1)
+        exc = self.trap_exception(r)
+        self.assertEqual(exc.metadata['error'], 'TestError(boom)')
+        self.assertEqual(exc.metadata['retries'], 0)
+
+    def test_retry_then_success(self):
+        state = []
+        @self.huey.task(retries=2)
+        def task_a():
+            state.append(1)
+            if len(state) == 1:
+                raise TestError('boom')
+            return 'ok'
+
+        r = task_a()
+
+        # The task fails on its first attempt, but because no intermediate error
+        # is stored the result handle is not poisoned -- unlike the default
+        # behavior, no reset() is needed to read the eventual success value.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(self.huey.result_count(), 0)
+        self.assertTrue(r.get() is None)
+
+        self.assertEqual(self.execute_next(), 'ok')
+        self.assertEqual(r.get(), 'ok')
+        self.assertEqual(len(self.huey), 0)
+
+    def test_on_error_deferred(self):
+        state = []
+        @self.huey.task(retries=1)
+        def task_a():
+            raise TestError('boom')
+
+        @self.huey.task()
+        def task_e(err):
+            state.append(repr(err))
+
+        self.huey.enqueue(task_a.s().error(task_e))
+
+        # First attempt fails with a retry remaining: the on_error handler is
+        # withheld and only the task itself is re-enqueued.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 1)
+        self.assertEqual(state, [])
+
+        # Final attempt exhausts retries: the on_error handler is enqueued and
+        # fires exactly once.
+        self.assertTrue(self.execute_next() is None)
+        self.assertEqual(len(self.huey), 1)
+        self.execute_next()
+        self.assertEqual(state, ['TestError(boom)'])
+        self.assertEqual(len(self.huey), 0)
 
 
 class TestStorageWrappers(BaseTestCase):
