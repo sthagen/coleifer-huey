@@ -13,18 +13,9 @@ The API documentation will follow the structure of the huey ``api.py`` module.
 Huey types
 ----------
 
-Implementations of :py:class:`Huey` which handle task and result persistence.
-
 .. note::
     See the documentation for :py:class:`Huey` for the list of initialization
     parameters common to all Huey implementations.
-
-.. warning::
-    If you have a busy application and plan to switch from one of the Redis
-    implementations to another (e.g. switch from ``RedisHuey`` to the
-    ``PriorityRedisHuey``) you may want to start the new huey consumer on a
-    different Redis database (e.g. ``db=15``). Then let your old consumer drain
-    any pre-existing tasks while the new consumer accepts new tasks.
 
 .. py:class:: RedisHuey
 
@@ -132,11 +123,30 @@ Implementations of :py:class:`Huey` which handle task and result persistence.
     :param str filename: filename for database, defaults to 'huey.db'.
     :param int cache_mb: megabytes of memory to allow for sqlite page-cache.
     :param bool fsync: use durable writes. Slower but more resilient to
-        corruption in the event of sudden power loss. Defaults to false.
+        corruption in the event of sudden power loss. By default will use the
+        SQLite library's ``synchronous`` setting (typically ``1``, which
+        provides a good balance between durability and performance).
 
     SqliteHuey fully supports task priorities.
 
     .. seealso:: :py:class:`SqliteStorage`
+
+.. py:class:: CySqliteHuey
+
+    :py:class:`Huey` that utilizes sqlite for queue and result storage, driven
+    by `cysqlite <https://cysqlite.readthedocs.io/>`_ rather than the standard
+    library ``sqlite3`` module (``pip install huey[cysqlite]``).
+
+    Commonly-used keyword arguments:
+
+    :param str filename: filename for database, defaults to 'huey.db'.
+    :param dict pragmas: mapping of pragmas to apply to every connection. If
+        unset, ``journal_mode`` will default to ``'wal'``, which enables
+        readers to coexist with a single writer.
+
+    CySqliteHuey fully supports task priorities.
+
+    .. seealso:: :py:class:`CySqliteStorage`
 
 .. py:class:: PostgresHuey
 
@@ -325,7 +335,7 @@ Huey object
 
         :param options: keyword arguments passed to the :py:class:`Consumer`
             constructor (e.g. ``workers``, ``worker_type``, ``periodic``,
-            ``initial_delay``, etc.).
+            ``initial_delay``, etc.). See :ref:`consumer-options`.
         :returns: a :py:class:`Consumer` instance.
 
         Create a consumer programmatically, rather than using the
@@ -347,12 +357,15 @@ Huey object
         :param int retry_delay: number of seconds to wait between retries.
         :param retry_backoff: multiplier applied to the delay after each failed
             attempt, giving exponentially-growing waits between retries. The
-            first retry waits ``retry_delay`` seconds. See
+            first retry waits ``retry_delay`` seconds. Defaults to ``0``, which
+            disables backoff. A value of ``1`` leaves the delay constant, and
+            values below ``1`` shrink it. Floats are accepted. See
             :ref:`recipe-exponential-backoff`.
         :param int priority: priority assigned to task, higher numbers are
             processed first by the consumer when there is a backlog. See
-            :ref:`priority` (requires a storage backend with priority
-            support, e.g. :py:class:`SqliteHuey` or :py:class:`PriorityRedisHuey`).
+            :ref:`priority` (supported by every storage backend except
+            :py:class:`RedisHuey` and :py:class:`RedisExpireHuey`, which have
+            priority-aware counterparts).
         :param bool context: when the task is executed, include the
             :py:class:`Task` instance as a keyword argument.
         :param str name: name for this task. If not provided, Huey will default
@@ -376,9 +389,9 @@ Huey object
         Function decorator that marks the decorated function for processing by
         the consumer. Calls to the decorated function will do the following:
 
-        1. Serialize the function call into a :py:class:`Message` suitable for
+        1. Serialize the function call into a :py:class:`Task` suitable for
            storing in the queue.
-        2. Enqueue the message for execution by the consumer.
+        2. Enqueue the task for execution by the consumer.
         3. Return a :py:class:`Result` handle, which can be used to check the
            result of the task function, revoke the task (assuming it hasn't
            started yet), reschedule the task, and more.
@@ -439,8 +452,9 @@ Huey object
             attempt. See :py:meth:`~Huey.task`.
         :param int priority: priority assigned to task, higher numbers are
             processed first by the consumer when there is a backlog. See
-            :ref:`priority` (requires a storage backend with priority
-            support, e.g. :py:class:`SqliteHuey` or :py:class:`PriorityRedisHuey`).
+            :ref:`priority` (supported by every storage backend except
+            :py:class:`RedisHuey` and :py:class:`RedisExpireHuey`, which have
+            priority-aware counterparts).
         :param bool context: when the task is executed, include the
             :py:class:`Task` instance as a parameter.
         :param str name: name for this task. If not provided, Huey will default
@@ -731,6 +745,17 @@ Huey object
         completes (or fails). If the consumer is killed mid-task, those tasks
         remain in the ``_tasks_in_flight`` set, and this method emits
         ``SIGNAL_INTERRUPTED`` for each one.
+
+    .. py:method:: build_error_result(task, exception)
+
+        :param task: the :py:class:`Task` that raised.
+        :param Exception exception: the unhandled exception.
+        :returns: dict stored in the result store as the task's error result.
+
+        Build the metadata stored when a task fails. The default implementation
+        returns the exception's ``repr()``, the formatted traceback, the retry
+        count and the task id. Override it on a :py:class:`Huey` subclass to
+        record additional context. See :ref:`recipe-custom-error-metadata`.
 
     .. py:method:: enqueue(task)
 
@@ -1127,7 +1152,7 @@ Huey object
         directly. The :py:meth:`Huey.task` and :py:meth:`Huey.periodic_task`
         decorators will create the appropriate TaskWrapper automatically.
 
-    .. py:method:: schedule(args=None, kwargs=None, eta=None, delay=None, priority=None, retries=None, retry_delay=None, expires=None, timeout=None, id=None)
+    .. py:method:: schedule(args=None, kwargs=None, eta=None, delay=None, priority=None, retries=None, retry_delay=None, retry_backoff=None, expires=None, timeout=None, id=None)
 
         :param tuple args: arguments for decorated function.
         :param dict kwargs: keyword arguments for decorated function.
@@ -1138,6 +1163,8 @@ Huey object
         :param int retries: number of times to retry the function if an
             unhandled exception occurs when it is executed.
         :param int retry_delay: number of seconds to wait between retries.
+        :param retry_backoff: multiplier applied to the delay after each failed
+            attempt. See :py:meth:`~Huey.task`.
         :param expires: set expiration time for task - if task is not run
             before ``expires``, it will be discarded. The ``expires`` parameter
             can be either an integer (seconds), a timedelta, or a datetime. For
@@ -1329,7 +1356,7 @@ Huey object
 
 
 
-.. py:class:: Task(args=None, kwargs=None, id=None, eta=None, retries=None, retry_delay=None, priority=None, expires=None, timeout=None, on_complete=None, on_error=None)
+.. py:class:: Task(args=None, kwargs=None, id=None, eta=None, retries=None, retry_delay=None, retry_backoff=None, priority=None, expires=None, timeout=None, on_complete=None, on_error=None)
 
     :param tuple args: arguments for the function call.
     :param dict kwargs: keyword arguments for the function call.
@@ -1337,6 +1364,8 @@ Huey object
     :param datetime eta: time at which task should be executed.
     :param int retries: automatic retry attempts.
     :param int retry_delay: seconds to wait before retrying a failed task.
+    :param retry_backoff: multiplier applied to ``retry_delay`` after each
+        failed attempt. See :py:meth:`~Huey.task`.
     :param int priority: priority assigned to task, higher numbers are
         processed first by the consumer when there is a backlog.
     :param expires: set expiration time for task - if task is not run
@@ -2073,6 +2102,44 @@ Result
 
         Return the number of results in the group.
 
+Consumer
+--------
+
+.. py:class:: Consumer(huey, workers=1, periodic=True, initial_delay=0.1, backoff=1.15, max_delay=10.0, scheduler_interval=1, worker_type='thread', check_worker_health=True, health_check_interval=10, flush_locks=False, extra_locks=None, max_tasks=None)
+
+    :param huey: the :py:class:`Huey` instance whose queue will be consumed.
+
+    Coordinates the workers and the scheduler, and installs the shutdown signal
+    handlers. This is what the ``huey_consumer`` command-line tool runs, and
+    what :py:meth:`Huey.create_consumer` returns. The keyword arguments
+    correspond one-to-one with the command-line options documented in
+    :ref:`consumer-options`.
+
+    Instantiate it directly only when embedding the consumer in another process
+    or writing tests. Ordinarily, run ``huey_consumer`` (or ``manage.py
+    run_huey`` under Django) instead.
+
+    .. py:method:: run()
+
+        Start the consumer and block until it is shut down, either by a signal
+        or by :py:meth:`stop`. This is what ``huey_consumer`` calls.
+
+    .. py:method:: start()
+
+        Start the worker and scheduler processes and register the signal
+        handlers, then return immediately. Raises
+        :py:class:`ConfigurationError` if the :py:class:`Huey` instance has
+        ``immediate`` enabled.
+
+    .. py:method:: stop(graceful=False)
+
+        :param bool graceful: block until in-flight tasks finish.
+
+        Set the stop flag. With ``graceful=False`` (default) the method returns
+        as soon as the flag is set, interrupting any running tasks. With
+        ``graceful=True`` it blocks until every worker has finished the task it
+        is currently executing.
+
 Serializer
 ----------
 
@@ -2215,6 +2282,7 @@ Huey comes with several built-in storage implementations:
 
 .. py:class:: RedisStorage(name='huey', blocking=True, read_timeout=1, connection_pool=None, url=None, client_name=None, notify_result=False, notify_result_ttl=86400, **connection_params)
 
+    :param str name: namespace for storage.
     :param bool blocking: Use blocking-pop when reading from the queue (as
         opposed to polling). Default is true.
     :param read_timeout: Timeout to use when performing a blocking pop, default
@@ -2247,6 +2315,7 @@ Huey comes with several built-in storage implementations:
 
 .. py:class:: PriorityRedisStorage(name='huey', blocking=True, read_timeout=1, connection_pool=None, url=None, client_name=None, notify_result=False, notify_result_ttl=86400, **connection_params)
 
+    :param str name: namespace for storage.
     :param bool blocking: Use blocking-zpopmin when reading from the queue (as
         opposed to polling). Default is true.
     :param read_timeout: Timeout to use when performing a blocking pop, default
@@ -2279,13 +2348,15 @@ Huey comes with several built-in storage implementations:
     automatically cleaned-up.
 
 
-.. py:class:: SqliteStorage(filename='huey.db', name='huey', cache_mb=8, fsync=False, timeout=5, strict_fifo=False, **kwargs)
+.. py:class:: SqliteStorage(name='huey', filename='huey.db', cache_mb=8, fsync=None, journal_mode='wal', timeout=5, strict_fifo=False, create_tables=True, **kwargs)
 
+    :param str name: namespace for storage.
     :param str filename: sqlite database filename.
     :param int cache_mb: sqlite page-cache size in megabytes.
-    :param bool fsync: if enabled, all writes to the Sqlite database will be
+    :param bool fsync: if ``True``, all writes to the Sqlite database will be
         synchronized. This provides greater safety from database corruption in
-        the event of sudden power-loss.
+        the event of sudden power-loss. If set to ``False`` then let the OS
+        handle syncing to disk. Uses the library default if unspecified.
     :param str journal_mode: sqlite journaling mode to use. Defaults to using
         write-ahead logging, which enables readers to coexist with a single
         writer.
@@ -2295,12 +2366,41 @@ Huey comes with several built-in storage implementations:
         FIFO. By default, Sqlite may reuse rowids for deleted tasks, which can
         cause tasks to be run in a different order than the order in which they
         were enqueued.
+    :param bool create_tables: create tables if they do not exist.
     :param kwargs: Additional keyword arguments passed to the ``sqlite3``
         connection constructor.
 
 
+.. py:class:: CySqliteStorage(name='huey', filename='huey.db', pragmas=None, timeout=5, strict_fifo=False, create_tables=True, **kwargs)
+
+    Extends :py:class:`SqliteStorage`, using `cysqlite <https://cysqlite.readthedocs.io/>`_
+    as the driver instead of the standard library ``sqlite3`` module.
+
+    :param str name: namespace for storage.
+    :param str filename: sqlite database filename.
+    :param dict pragmas: mapping of pragmas to apply to every connection. If
+        unset, ``journal_mode`` will default to ``'wal'``, which enables
+        readers to coexist with a single writer.
+    :param int timeout: busy timeout (in seconds), amount of time to wait to
+        acquire the write lock when another thread / connection holds it.
+    :param bool strict_fifo: ensure that the task queue behaves as a strict
+        FIFO. By default, Sqlite may reuse rowids for deleted tasks, which can
+        cause tasks to be run in a different order than the order in which they
+        were enqueued.
+    :param bool create_tables: create tables if they do not exist.
+    :param kwargs: Additional keyword arguments passed to
+        ``cysqlite.connect()``.
+
+    Where :py:class:`SqliteStorage` exposes a fixed set of tuning parameters,
+    this storage takes an open-ended ``pragmas`` dict. The
+    :py:class:`SqliteStorage` parameters ``cache_mb``, ``fsync`` and
+    ``journal_mode`` are still accepted and are translated into the
+    corresponding ``cache_size``, ``synchronous`` and ``journal_mode`` pragmas.
+
+
 .. py:class:: PostgresStorage(name='huey', dsn=None, connection=None, blocking=True, read_timeout=1, table_prefix='huey', create_tables=True, **connection_params)
 
+    :param str name: namespace for storage.
     :param str dsn: connection string or URL for ``psycopg.connect()``.
     :param connection: zero-argument callable returning a new ``psycopg``
         connection.

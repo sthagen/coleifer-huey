@@ -1,8 +1,9 @@
 __author__ = 'Charles Leifer'
 __license__ = 'MIT'
-__version__ = '3.2.1'
+__version__ = '3.3.0'
 
 from huey.api import BlackHoleHuey
+from huey.api import CySqliteHuey
 from huey.api import Huey
 from huey.api import FileHuey
 from huey.api import MemoryHuey

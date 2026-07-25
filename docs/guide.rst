@@ -572,9 +572,10 @@ Task priority
     priorities with Redis, use the :py:class:`PriorityRedisHuey` instead of
     :py:class:`RedisHuey`.
 
-    Task prioritization is fully supported by :py:class:`SqliteHuey` and the
-    file-based :py:class:`FileHuey`. The in-memory storage layer (used when
-    :ref:`immediate` is enabled) also supports task priorities.
+    Every other storage layer supports task priorities natively:
+    :py:class:`SqliteHuey`, :py:class:`CySqliteHuey`,
+    :py:class:`PostgresHuey`, the file-based :py:class:`FileHuey`, and the
+    in-memory storage layer used when :ref:`immediate` is enabled.
 
 Huey tasks can be given a priority, allowing you to ensure that your most
 important tasks do not get delayed when the workers are busy.
@@ -657,8 +658,9 @@ Lastly, we can specify priority on :py:class:`~Huey.periodic_task`:
 For more information:
 
 * :py:class:`PriorityRedisHuey` - Huey implementation that adds support for
-  task priorities with the Redis storage layer. *Requires Redis 5.0 or newer*.
-* :py:class:`SqliteHuey` and the in-memory storage used when immediate-mode is
+  task priorities with the Redis storage layer.
+* :py:class:`PostgresHuey`, :py:class:`SqliteHuey`, :py:class:`CySqliteHuey`,
+  :py:class:`FileHuey` and the in-memory storage used when immediate-mode is
   enabled have full support for task priorities.
 * :py:meth:`~Huey.task` and :py:meth:`~Huey.periodic_task`
 
@@ -1766,6 +1768,28 @@ weaknesses of each storage layer.
     ``SqliteHuey`` may be a good choice for moderate workloads where the
     operational complexity of running a separate server process like Redis is
     undesirable.
+
+:py:class:`CySqliteHuey`
+    Same storage layout and characteristics as :py:class:`SqliteHuey`, but
+    driven by `cysqlite <https://cysqlite.readthedocs.io/>`_ rather than the
+    standard library ``sqlite3`` module. Connection tuning is done with an
+    open-ended ``pragmas`` dict instead of a fixed set of parameters.
+
+:py:class:`PostgresHuey`
+    Workers dequeue using ``select ... for update skip locked``, so any number
+    of consumers, on any number of hosts, can share a queue without contending
+    for the same rows. ``LISTEN``/``NOTIFY`` wakes an idle worker as soon as a
+    task is enqueued, so there is no polling latency. Huey's four tables can
+    live in the application's existing database, which means the queue is
+    backed up and restored along with everything else.
+
+    Each worker holds one additional connection for ``LISTEN``, so a consumer
+    with N workers uses N+1 connections. Connection poolers that multiplex
+    (PgBouncer in transaction-pooling mode) break ``LISTEN``. Initialize with
+    ``blocking=False`` to fall back to polling in that case.
+
+    ``PostgresHuey`` is a good choice when your application already runs
+    Postgres and you would rather not operate a separate Redis server.
 
 :py:class:`FileHuey`
     Stores the queue, schedule and task results in files on the filesystem.

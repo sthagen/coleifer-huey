@@ -10,12 +10,18 @@ import uuid
 from queue import Queue
 
 try:
+    import cysqlite
+except ImportError:
+    cysqlite = None
+
+try:
     from redis.connection import ConnectionPool
     from redis import Redis
     from redis.exceptions import ConnectionError as RedisConnectionError
 except ImportError:
     ConnectionPool = Redis = RedisConnectionError = None
 
+from huey.api import CySqliteHuey
 from huey.api import Huey
 from huey.api import MemoryHuey
 from huey.api import PriorityRedisHuey
@@ -451,6 +457,57 @@ class TestSqliteStorage(StorageTests, BaseTestCase):
         self.assertEqual(self.s._timeout, 3)
         curs = self.s.conn.execute('pragma busy_timeout')
         self.assertEqual(curs.fetchone(), (3000,))
+
+
+@unittest.skipIf(cysqlite is None, 'requires cysqlite')
+class TestCySqliteStorage(StorageTests, BaseTestCase):
+    def tearDown(self):
+        super(TestCySqliteStorage, self).tearDown()
+        if os.path.exists('huey_storage.db'):
+            os.unlink('huey_storage.db')
+
+    def get_huey(self):
+        return CySqliteHuey(filename='huey_storage.db', timeout=3, pragmas={
+            'mmap_size': 1024 * 1024 * 32,
+            'synchronous': 1,
+        })
+
+    def test_pragmas_preserved(self):
+        conn = self.s.conn
+        self.assertEqual(conn.pragma('mmap_size'), 1024 * 1024 * 32)
+        self.assertEqual(conn.pragma('synchronous'), 1)
+        self.assertEqual(conn.pragma('journal_mode'), 'wal')
+
+    def test_sqlite_params_normalized(self):
+        pragmas = {'mmap_size': 4096}
+        huey = CySqliteHuey(filename='huey_np.db', pragmas=pragmas,
+                            cache_mb=4, fsync=True, journal_mode='truncate')
+        try:
+            conn = huey.storage.conn
+            self.assertEqual(conn.pragma('mmap_size'), 4096)
+            self.assertEqual(conn.pragma('cache_size'), -4000)
+            self.assertEqual(conn.pragma('synchronous'), 2)
+            self.assertEqual(conn.pragma('journal_mode'), 'truncate')
+            self.assertEqual(pragmas, {'mmap_size': 4096})
+        finally:
+            huey.storage.close()
+            if os.path.exists('huey_np.db'):
+                os.unlink('huey_np.db')
+
+    def test_create_tables(self):
+        huey = CySqliteHuey(filename='huey_ct.db', create_tables=False)
+        try:
+            self.assertRaises(cysqlite.OperationalError, huey.pending_count)
+            huey.storage.initialize_schema()
+            self.assertEqual(huey.pending_count(), 0)
+        finally:
+            huey.storage.close()
+            if os.path.exists('huey_ct.db'):
+                os.unlink('huey_ct.db')
+
+    def test_timeout(self):
+        self.assertEqual(self.s._timeout, 3)
+        self.assertEqual(self.s.conn.pragma('busy_timeout'), 3000)
 
 
 class TestFileStorageMethods(StorageTests, BaseTestCase):

@@ -3,6 +3,10 @@ Changelog
 
 ## master
 
+[View commits](https://github.com/coleifer/huey/compare/3.3.0...master)
+
+## 3.3.0
+
 * Add `retry_backoff` parameter to `task()` and `periodic_task()`. The first
   retry waits `retry_delay` seconds and each subsequent delay is multiplied by
   `retry_backoff`, giving exponentially-growing waits between retries.
@@ -33,8 +37,11 @@ Changelog
 * Fire the chord callback when a pipelined member dies before its tail. A
   failed, revoked, or expired stage now contributes for the member, where
   previously the chord counter stayed short and the callback never ran.
+* Add `CySqliteHuey`, which drives the sqlite storage w/ `cysqlite` instead of
+  the stdlib `sqlite3` module and takes an open-ended `pragmas` dict in place
+  of a fixed set of tuning parameters.
 
-[View commits](https://github.com/coleifer/huey/compare/3.2.1...master)
+[View commits](https://github.com/coleifer/huey/compare/3.2.1...3.3.0)
 
 ## 3.2.1
 

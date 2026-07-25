@@ -15,6 +15,11 @@ import threading
 import time
 
 try:
+    import cysqlite
+except ImportError:
+    cysqlite = None
+
+try:
     from redis import ConnectionPool
     from redis import Redis
     from redis.exceptions import ConnectionError
@@ -812,6 +817,8 @@ class BaseSqlStorage(BaseStorage):
 
 class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
+    integrity_error = sqlite3.IntegrityError
+    sqlite_version_info = sqlite3.sqlite_version_info
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
                 'primary key(queue, key))')
@@ -833,7 +840,7 @@ class SqliteStorage(BaseSqlStorage):
            table_counter]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
-                 fsync=False, journal_mode='wal', timeout=5, strict_fifo=False,
+                 fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
                  create_tables=True, **kwargs):
         self.filename = filename
         self._cache_mb = cache_mb
@@ -855,7 +862,7 @@ class SqliteStorage(BaseSqlStorage):
                 'primary key autoincrement')
             self.ddl = ddl
 
-        self.to_blob = lambda b: sqlite3.Binary(b)
+        self.to_blob = memoryview
 
         super(SqliteStorage, self).__init__(name, create_tables=create_tables)
 
@@ -867,7 +874,8 @@ class SqliteStorage(BaseSqlStorage):
         conn.execute('pragma journal_mode="%s"' % self._journal_mode)
         if self._cache_mb:
             conn.execute('pragma cache_size=%s' % (-1000 * self._cache_mb))
-        conn.execute('pragma synchronous=%s' % (2 if self._fsync else 0))
+        if self._fsync is not None:
+            conn.execute('pragma synchronous=%s' % (2 if self._fsync else 0))
         return conn
 
     def enqueue(self, data, priority=None):
@@ -949,7 +957,7 @@ class SqliteStorage(BaseSqlStorage):
 
     def pop_data(self, key):
         with self.db(commit=True) as curs:
-            if sqlite3.sqlite_version_info >= (3, 35, 0):
+            if self.sqlite_version_info >= (3, 35, 0):
                 curs.execute('delete from kv where queue = ? and key = ? '
                              'returning value', (self.name, key))
                 result = curs.fetchone()
@@ -976,21 +984,21 @@ class SqliteStorage(BaseSqlStorage):
                 curs.execute('insert or abort into kv '
                              '(queue, key, value) values (?, ?, ?)',
                              (self.name, key, self.to_blob(value)))
-        except sqlite3.IntegrityError:
+        except self.integrity_error:
             return False
         else:
             return True
 
     def incr(self, key, amount=1):
         with self.db(commit=True) as curs:
-            if sqlite3.sqlite_version_info >= (3, 35, 0):
+            if self.sqlite_version_info >= (3, 35, 0):
                 curs.execute('insert into counter (queue, key, value) '
                              'values (?, ?, ?) on conflict (queue, key) '
                              'do update set value = value + ? '
                              'returning value',
                              (self.name, key, amount, amount))
                 value, = curs.fetchone()
-            elif sqlite3.sqlite_version_info >= (3, 24, 0):
+            elif self.sqlite_version_info >= (3, 24, 0):
                 curs.execute('insert into counter (queue, key, value) '
                              'values (?, ?, ?) on conflict (queue, key) '
                              'do update set value = value + ?',
@@ -1022,6 +1030,39 @@ class SqliteStorage(BaseSqlStorage):
 
     def flush_counters(self):
         self.sql('delete from counter where queue=?', (self.name,), True)
+
+
+class CySqliteStorage(SqliteStorage):
+    def __init__(self, name='huey', filename='huey.db', pragmas=None,
+                 timeout=5, strict_fifo=False, create_tables=True, **kwargs):
+        if cysqlite is None:
+            raise ConfigurationError('"cysqlite" not found. Run "pip install '
+                                     'cysqlite" to install.')
+        self.integrity_error = cysqlite.IntegrityError
+        self.sqlite_version_info = cysqlite.sqlite_version_info
+
+        # Normalize hard-coded params to generic pragmas.
+        pragmas = dict(pragmas or {})
+        pragmas.setdefault('journal_mode', 'wal')
+        if 'journal_mode' in kwargs:
+            pragmas['journal_mode'] = kwargs.pop('journal_mode') or 'wal'
+        if 'cache_mb' in kwargs:
+            pragmas['cache_size'] = kwargs.pop('cache_mb') * -1000
+        if 'fsync' in kwargs:
+            pragmas['synchronous'] = 2 if kwargs.pop('fsync') else 0
+
+        super(CySqliteStorage, self).__init__(
+            name,
+            filename,
+            timeout=timeout,
+            strict_fifo=strict_fifo,
+            create_tables=create_tables,
+            pragmas=pragmas,
+            **kwargs)
+
+    def _create_connection(self):
+        return cysqlite.connect(self.filename, timeout=self._timeout,
+                                **self._conn_kwargs)
 
 
 class PostgresStorage(BaseSqlStorage):
