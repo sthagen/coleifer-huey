@@ -817,8 +817,8 @@ class BaseSqlStorage(BaseStorage):
 
 class SqliteStorage(BaseSqlStorage):
     begin_sql = 'begin exclusive'
-    integrity_error = sqlite3.IntegrityError
-    sqlite_version_info = sqlite3.sqlite_version_info
+    integrity_error = getattr(sqlite3, 'IntegrityError', None)
+    sqlite_version_info = getattr(sqlite3, 'sqlite_version_info', None)
     table_kv = ('create table if not exists kv ('
                 'queue text not null, key text not null, value blob not null, '
                 'primary key(queue, key))')

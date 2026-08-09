@@ -3,9 +3,9 @@
 Guide
 =====
 
-The purpose of this document is to present Huey using simple examples that
-cover the most common usage of the library. Detailed documentation can be found
-in the :ref:`API documentation <api>`.
+This document presents Huey using simple examples that cover the most common
+usage of the library. Detailed documentation can be found in the
+:ref:`API documentation <api>`.
 
 Example :py:meth:`~Huey.task` that adds two numbers:
 
@@ -431,11 +431,10 @@ your :py:class:`Huey` instance:
 
     huey = RedisHuey('my-app', immediate_use_memory=False)
 
-You can try out immediate mode quite easily in the Python shell. In the
-following example, everything happens within the interpreter and no separate
-consumer process is needed. In fact, because immediate mode switches to an
-in-memory storage when enabled, we don't even have to be running a Redis
-server:
+You can try immediate mode in the Python shell. In the following example,
+everything happens within the interpreter with no separate consumer process.
+Because immediate mode switches to in-memory storage when enabled, no Redis
+server is needed either:
 
 .. code-block:: pycon
 
@@ -469,9 +468,8 @@ using immediate mode?
     >>> result() is None  # No result.
     True
 
-As you can see, the task was not executed. So what happened to it? The answer
-is that the task was added to the in-memory storage layer's schedule. We can
-check this by calling :py:meth:`Huey.scheduled`:
+The task was not executed. Instead it was added to the in-memory storage
+layer's schedule, which we can check by calling :py:meth:`Huey.scheduled`:
 
 .. code-block:: pycon
 
@@ -863,9 +861,9 @@ The actual implementation of the timeout mechanism depends on which worker type
 you are using in the consumer, and is selected automatically by Huey:
 
 * Process: uses ``SIGALRM``, most robust.
-* Thread: threads do **NOT** support a hard timeout. In order to use timeouts
-  with threaded workers, it is necessary to do cooperative timeout-checking
-  from within your task function, described below.
+* Thread: threads do **NOT** support a hard timeout. To use timeouts with
+  threaded workers, do cooperative timeout-checking from within your task
+  function, described below.
 * Greenlet: uses ``gevent.Timeout``, reliable so long as the task yields to the
   event loop and is not held-up making a blocking call.
 
@@ -901,9 +899,9 @@ fired.
 Cooperative Timeout
 ^^^^^^^^^^^^^^^^^^^
 
-Threads do not support a hard timeout, so in order to implement timeouts when
-using threaded workers **or** if you prefer more control within your task
-function, you can use the cooperative timeout APIs:
+Threads do not support a hard timeout. To implement timeouts with threaded
+workers, or if you prefer more control within your task function, use the
+cooperative timeout APIs:
 
 * :py:meth:`Task.check_timeout`
 * :py:attr:`Task.is_timed_out`
@@ -1123,7 +1121,7 @@ Note that the return value from the parent task is passed to the next task in
 the pipeline, and so on.
 
 If the value returned by the parent function is a ``tuple``, then the tuple
-will be used to extend the ``*args`` for the next task.  Likewise, if the
+will be used to extend the ``*args`` for the next task. Likewise, if the
 parent function returns a ``dict``, then the dict will be used to update the
 ``**kwargs`` for the next task.
 
@@ -1587,8 +1585,8 @@ The :py:meth:`Huey.signal` method can be used to attach a callback to one or
 more signals, which will be invoked synchronously by the consumer when the
 signal is sent.
 
-For a simple example, we can add a signal handler that simply prints the signal
-name and the ID of the related task.
+As an example, we can add a signal handler that prints the signal name and the
+ID of the related task.
 
 .. code-block:: python
 
@@ -1719,11 +1717,9 @@ weaknesses of each storage layer.
     by Redis. The queue is stored in a Redis list, scheduled tasks use a sorted
     set, and the task result-store is kept in a hash.
 
-    Tasks that return a meaningful value must be sure that the caller
-    "resolves" those return values at some point, to ensure that the result
-    store does not become filled with unused data (to mitigate this, you can
-    just modify your tasks to return ``None`` if you never intend to use the
-    result).
+    Tasks that return a meaningful value rely on the caller "resolving" those
+    return values at some point, so the result store does not fill up with
+    unused data. Tasks whose result you never read should return ``None``.
 
     By default Huey performs a "blocking" pop on the queue, which reduces
     latency, although polling can be used instead by passing ``blocking=False``
@@ -1739,18 +1735,16 @@ weaknesses of each storage layer.
     Task priorities are not supported by :py:class:`RedisHuey`.
 
 :py:class:`PriorityRedisHuey`
-    Redis storage layer that supports task priorities. In order to make this
-    possible and efficient, ``PriorityRedisHuey`` stores the queue in a sorted
-    set. Since sorted sets require the key to be unique, Huey will use the
-    timestamp in microseconds to differentiate tasks enqueued with the same
-    priority.
+    Redis storage layer that supports task priorities. To make this efficient,
+    ``PriorityRedisHuey`` stores the queue in a sorted set. Since sorted sets
+    require unique keys, Huey uses the timestamp in microseconds to
+    differentiate tasks enqueued with the same priority.
 
 :py:class:`RedisExpireHuey`
-    Redis storage layer that stores task results in top-level keys, in order to
-    add an expiration time to them. Putting an expiration on task result keys
-    can ensure that the result-store does not fill up with unresolved result
-    values. The default expire time is 86400 seconds, although this can be
-    controlled by setting the ``expire_time`` parameter during instantiation.
+    Redis storage layer that stores each task result in its own top-level key
+    with an expiration time, so the result-store does not fill up with
+    unresolved result values. The default expire time is 86400 seconds, set
+    with the ``expire_time`` parameter during instantiation.
 
 :py:class:`PriorityRedisExpireHuey`
     Combines the behaviors of :py:class:`PriorityRedisHuey` to support task
@@ -1763,7 +1757,7 @@ weaknesses of each storage layer.
     chosen. Sqlite locks the database during writes, ensuring only a single
     writer can write to the database at any given time. Writes generally happen
     very quickly, however, so in practice this is rarely an issue. Because the
-    database is stored in a single file, taking backups is quite simple.
+    database is stored in a single file, taking backups is simple.
 
     ``SqliteHuey`` may be a good choice for moderate workloads where the
     operational complexity of running a separate server process like Redis is

@@ -627,7 +627,8 @@ class Huey(object):
                                  'hook %s for %s.', name, task)
 
     def build_error_result(self, task, exception):
-        tb = traceback.format_exc()
+        tb = ''.join(traceback.format_exception(
+            type(exception), exception, exception.__traceback__))
         if isinstance(exception, TaskException):
             error = exception.metadata.get('error') or repr(exception)
         else:

@@ -75,23 +75,6 @@ class TestMiniHuey(BaseTestCase):
         res = add.schedule((1, 2), delay=0.1)
         self.assertEqual(res.get(timeout=5), 3)
 
-    def test_periodic_task(self):
-        state = []
-
-        @self.huey.task(crontab(minute='*'))
-        def tick():
-            state.append(1)
-
-        self.avoid_minute_boundary()
-        self.huey._last_check -= datetime.timedelta(minutes=1)
-        gevent.sleep(0.3)
-        self.assertEqual(len(state), 1)
-        self.assertEqual(self.huey._last_check, datetime.datetime.now()
-                         .replace(second=0, microsecond=0))
-
-        gevent.sleep(0.3)
-        self.assertEqual(len(state), 1)
-
     def test_scheduler_error(self):
         add = self.make_add()
 

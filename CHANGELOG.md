@@ -3,7 +3,63 @@ Changelog
 
 ## master
 
-[View commits](https://github.com/coleifer/huey/compare/3.3.0...master)
+[View commits](https://github.com/coleifer/huey/compare/3.3.4...master)
+
+## 3.3.4
+
+* Use `DoubleField` for the stats `ts`, `duration` and `started` columns.
+  On PG & MySQL the old `FloatField` was a 32-bit-shitter which lost a lot of
+  seconds of precision. Existing PG/MySQL tables will need to run the SQL below
+  to migrate OR just drop the tables and allow them to be rebuilt next run.
+  SQLite was not affected. Fixes #909.
+
+```sql
+-- Postgres
+alter table "huey_event" alter column "ts" type double precision;
+alter table "huey_event" alter column "duration" type double precision;
+alter table "huey_inflight" alter column "started" type double precision;
+
+-- MySQL
+alter table `huey_event` modify `ts` double not null;
+alter table `huey_event` modify `duration` double;
+alter table `huey_inflight` modify `started` double not null;
+```
+
+[View commits](https://github.com/coleifer/huey/compare/3.3.3...3.3.4)
+
+## 3.3.3
+
+* Forward the Django database `OPTIONS` when setting up the stats recorder
+  connection. Fixes / replaces #907.
+* Remove accidental `sqlite3` access at module scope, #908.
+
+[View commits](https://github.com/coleifer/huey/compare/3.3.2...3.3.3)
+
+## 3.3.2
+
+* Flush buffered stats in the worker shutdown hook. Fixes issue where recycled
+  workers might drop some writes.
+* Consolidate the stats flush to one inflight-table update per task, applied
+  in sorted order. Concurrent writers (one per process worker) could deadlock
+  in Postgres, and the failed flush dropped its whole batch of events.
+* Store the `FileLock` fd per-thread. Under thread contention the shared fd
+  was clobbered and released by the wrong thread, leaking a held flock and
+  wedging every process using that storage path. `FileHuey` with the default
+  thread workers deadlocked on first contention.
+
+[View commits](https://github.com/coleifer/huey/compare/3.3.1...3.3.2)
+
+## 3.3.1
+
+* Ensure traceback is stored properly for error results.
+* Restart the stats recorder in forked children via `os.register_at_fork`.
+  Previously the writer thread existed only in the process that called
+  `enable_stats()`, so a consumer w/ `worker_type='process'` (or a preforking
+  web server that loads the app before forking) buffered task events in its
+  workers but never wrote them, and the dashboard showed tasks stuck on
+  "enqueued".
+
+[View commits](https://github.com/coleifer/huey/compare/3.3.0...3.3.1)
 
 ## 3.3.0
 

@@ -1,4 +1,5 @@
 import atexit
+import os
 import threading
 import time
 
@@ -20,12 +21,12 @@ class BaseModel(peewee.Model):
 
 
 class HueyEvent(BaseModel):
-    ts = peewee.FloatField(index=True)
+    ts = peewee.DoubleField(index=True)
     queue = peewee.CharField(index=True)
     task_id = peewee.CharField()
     task = peewee.CharField(index=True)
     signal = peewee.CharField()
-    duration = peewee.FloatField(null=True)
+    duration = peewee.DoubleField(null=True)
     error = peewee.TextField(null=True)
     args = peewee.TextField(null=True)
 
@@ -37,7 +38,7 @@ class HueyInflight(BaseModel):
     task_id = peewee.CharField(primary_key=True)
     queue = peewee.CharField(index=True)
     task = peewee.CharField()
-    started = peewee.FloatField()
+    started = peewee.DoubleField()
 
     class Meta:
         table_name = 'huey_inflight'
@@ -81,16 +82,45 @@ class HueyStats(object):
         if database.obj is None:
             database.initialize(self.db)
         if create_tables:
+            # The writer thread opens its own connection. Close the one
+            # create_tables opens, so forked children do not inherit a live
+            # socket. Leave a connection the caller opened alone.
+            was_closed = self.db.is_closed()
             self.db.create_tables(MODELS, safe=True)
+            if was_closed:
+                self.db.close()
 
     def connect(self):
         if self._connected:
             return
         self._connected = True
         self.huey.signal()(self._on_signal)
+        # Worker processes exit via os._exit, which skips atexit-based flush.
+        self.huey.on_shutdown('huey_stats_flush')(self._flush)
+        if hasattr(os, 'register_at_fork'):
+            os.register_at_fork(after_in_child=self._reset_after_fork)
+        self._start_writer()
+        atexit.register(self.close)
+
+    def _start_writer(self):
         self._writer = threading.Thread(target=self._writer_loop, daemon=True)
         self._writer.start()
-        atexit.register(self.close)
+
+    def _reset_after_fork(self):
+        # Runs in the forked child while it is still single-threaded. The
+        # writer thread exists only in the parent, along with any locks it
+        # held at fork time. Rows buffered before the fork are the parent's
+        # to write. The inherited db connection shares a socket with the
+        # parent, so discard its state rather than close it.
+        if self._stop.is_set():
+            return
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._buf = []
+        self._start = {}
+        self.db._state.reset()
+        self._start_writer()
 
     def _on_signal(self, signal, task, exc=None):
         try:
@@ -133,19 +163,25 @@ class HueyStats(object):
             self._buf = []
         if not batch:
             return
+        # One inflight op per task, applied in task_id order, so concurrent
+        # writers acquire row locks identically and cannot deadlock.
+        inflight = {}
+        for row in batch:
+            if row['signal'] == S.SIGNAL_EXECUTING:
+                inflight[row['task_id']] = row
+            elif row['signal'] in TERMINAL:
+                inflight[row['task_id']] = None
         try:
             with self.db.atomic():
                 HueyEvent.insert_many(batch).execute()
-                for row in batch:
-                    if row['signal'] == S.SIGNAL_EXECUTING:
-                        HueyInflight.delete().where(
-                            HueyInflight.task_id == row['task_id']).execute()
+                for task_id in sorted(inflight):
+                    row = inflight[task_id]
+                    HueyInflight.delete().where(
+                        HueyInflight.task_id == task_id).execute()
+                    if row is not None:
                         HueyInflight.insert(
-                            task_id=row['task_id'], queue=row['queue'],
+                            task_id=task_id, queue=row['queue'],
                             task=row['task'], started=row['ts']).execute()
-                    elif row['signal'] in TERMINAL:
-                        HueyInflight.delete().where(
-                            HueyInflight.task_id == row['task_id']).execute()
         except Exception:
             return
         self._maybe_prune()

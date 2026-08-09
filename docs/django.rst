@@ -101,7 +101,7 @@ The following ``huey_class`` implementations are provided out-of-the-box:
 * ``huey.FileHuey`` - uses filesystem for storage. Accepts a ``path`` parameter
   for the base storage directory.
 
-Alternatively, you can simply set ``settings.HUEY`` to a :py:class:`Huey`
+Alternatively, you can set ``settings.HUEY`` to a :py:class:`Huey`
 instance and do your configuration directly. In the example below, I've also
 shown how you can create a connection pool:
 
@@ -186,15 +186,15 @@ example, when it references a row created in the same view), use
 Running the Consumer
 ^^^^^^^^^^^^^^^^^^^^
 
-To run the consumer, use the ``run_huey`` management command.  This command
+To run the consumer, use the ``run_huey`` management command. This command
 will automatically import any modules in your ``INSTALLED_APPS`` named
-*tasks.py*.  The consumer can be configured using both the django settings
+*tasks.py*. The consumer can be configured using both the django settings
 module and/or by specifying options from the command-line.
 
 Options specified on the command line take precedence over those specified in
 the settings module.
 
-To start the consumer, you simply run:
+To start the consumer, run:
 
 .. code-block:: shell
 
@@ -295,7 +295,7 @@ Tasks that execute queries
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 If you plan on executing queries inside your task, it is a good idea to close
-the connection once your task finishes.  To make this easier, huey provides a
+the connection once your task finishes. To make this easier, huey provides a
 special decorator to use in place of ``task`` and ``periodic_task`` which will
 automatically close the connection for you.
 

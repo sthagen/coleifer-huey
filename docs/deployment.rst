@@ -4,7 +4,7 @@ Deploying to Production
 =======================
 
 The huey consumer is a normal, foreground Python process. It does not
-daemonize, write pid-files, or manage its own lifecycle - that is the job of
+daemonize, write pid-files, or manage its own lifecycle. That is the job of
 a process supervisor like systemd, supervisord, Docker, or your PaaS. This
 document provides correct, copy-paste configurations for the common
 supervisors, along with a production checklist.
@@ -41,8 +41,8 @@ Two related points:
 
 * A graceful shutdown protects *running* tasks. A task interrupted by ``SIGKILL``
   (or a power loss) is lost. Set the stop-timeout to comfortably exceed your
-  longest-running task, register a ``SIGNAL_INTERRUPTED`` handler to re-enqueue
-  interrupted tasks (:ref:`recipe-interrupted-tasks`). As with any queue,
+  longest-running task, and register a ``SIGNAL_INTERRUPTED`` handler to
+  re-enqueue interrupted tasks (:ref:`recipe-interrupted-tasks`). As with any queue,
   design tasks to be idempotent wherever possible.
 * Do not wrap the consumer in a shell script. The supervisor must signal the
   Python process directly, as an intermediate shell will interfere with
@@ -106,7 +106,7 @@ Notes:
   rotation.
 * The ``process`` worker type works fine in containers. For ``greenlet``
   workers, remember the monkey-patch must be applied at the top of your
-  entry module - see :ref:`consuming-tasks`.
+  entry module. See :ref:`consuming-tasks`.
 
 Docker Compose
 --------------
@@ -148,7 +148,7 @@ The things that matter:
 * Kubernetes honors the image's ``STOPSIGNAL``, so the Dockerfile above gets
   graceful shutdown for free. Without it, the kubelet sends ``SIGTERM`` and
   running tasks are interrupted. (Alternatively, use a ``lifecycle.preStop``
-  hook, or simply rely on the ``SIGNAL_INTERRUPTED`` re-enqueue recipe.)
+  hook, or rely on the ``SIGNAL_INTERRUPTED`` re-enqueue recipe.)
 * ``terminationGracePeriodSeconds`` is the SIGKILL deadline: set it to
   comfortably exceed your longest-running task.
 * With ``replicas > 1``, periodic tasks must only be enqueued by one
@@ -223,13 +223,14 @@ Deploying new code
 The consumer caches your task code in memory, so deploys must restart (or
 gracefully re-exec) the consumer:
 
-* ``systemctl reload huey`` / ``kill -HUP <pid>`` - graceful in-place
-  restart: workers finish their current task, then the consumer re-executes
-  itself, picking up the new code.
-* Or stop gracefully (``SIGINT``) and start a new consumer - this is what
+* ``systemctl reload huey`` / ``kill -HUP <pid>`` performs a graceful
+  in-place restart. Workers finish their current task, then the consumer
+  re-executes itself, picking up the new code.
+* Or stop gracefully (``SIGINT``) and start a new consumer. This is what
   the supervisor configs above do on ``restart``.
 * For very long-running tasks, you can run old and new code side-by-side by
-  giving the new release a fresh storage ``name`` - see :ref:`consumer-deployments`.
+  giving the new release a fresh storage ``name``. See
+  :ref:`consumer-deployments`.
 
 Production checklist
 --------------------
@@ -240,9 +241,9 @@ Production checklist
   tasks are idempotent (:ref:`recipe-interrupted-tasks`).
 * Exactly one consumer enqueues periodic tasks and all others run with ``-n``
   (:ref:`multiple-consumers`).
-* The consumer is run directly - no shell-script wrappers.
+* The consumer is run directly, with no shell-script wrappers.
 * Result data is read (or expired) so the result store does not grow without
-  bound - read results, set ``expires=``, or use ``RedisExpireHuey``. See
+  bound. Read results, set ``expires=``, or use ``RedisExpireHuey``. See
   :ref:`troubleshooting`.
 * If you use :py:meth:`~Huey.lock_task`, start the consumer with
   ``-f`` / ``--flush-locks`` so locks orphaned by a crash are cleared.

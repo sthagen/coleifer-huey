@@ -29,7 +29,7 @@ Operational facts worth getting right:
   real execution path against in-memory storage.
 - When running multiple consumers of one queue, pass `-n` / `--no-periodic`
   to all but one, or periodic tasks will run once per consumer.
-- Task functions are regular `def` functions; `async def` execution is not
+- Task functions are regular `def` functions. `async def` execution is not
   supported. Use `huey.contrib.asyncio.aget_result` to await results from
   async code.
 
@@ -73,7 +73,9 @@ Operational facts worth getting right:
 
 ## Optional
 
-- [Changelog](https://huey.readthedocs.io/en/latest/changes.html)
+- [Upgrade notes](https://huey.readthedocs.io/en/latest/changes.html): API
+  changes in the 2.0 and 3.0 releases. The per-release changelog lives at
+  https://github.com/coleifer/huey/blob/master/CHANGELOG.md.
 - [Source code](https://github.com/coleifer/huey)
 - [Examples](https://github.com/coleifer/huey/tree/master/examples)
 - [MiniHuey](https://huey.readthedocs.io/en/latest/mini.html): in-process

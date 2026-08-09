@@ -370,7 +370,7 @@ Huey object
             :py:class:`Task` instance as a keyword argument.
         :param str name: name for this task. If not provided, Huey will default
             to using the module name plus function name.
-        :param expires: set expiration time for task - if task is not run
+        :param expires: set expiration time for task. If the task is not run
             before ``expires``, it will be discarded. The ``expires`` parameter
             can be either an integer (seconds), a timedelta, or a datetime. For
             relative expiration values, the expire time will be resolved when
@@ -459,7 +459,7 @@ Huey object
             :py:class:`Task` instance as a parameter.
         :param str name: name for this task. If not provided, Huey will default
             to using the module name plus function name.
-        :param expires: set expiration time for task - if task is not run
+        :param expires: set expiration time for task. If the task is not run
             before ``expires``, it will be discarded. The ``expires`` parameter
             can be either an integer (seconds), a timedelta, or a datetime. For
             relative expiration values, the expire time will be resolved when
@@ -858,7 +858,7 @@ Huey object
             been read, to prevent the result store from growing without bounds.
 
         Attempts to retrieve the return value of a task. By default, :py:meth:`~Huey.result`
-        will simply check for the value, returning ``None`` if it is not ready
+        will check for the value, returning ``None`` if it is not ready
         yet. If you want to wait for the result, specify ``blocking=True``.
         This will loop, backing off up to the provided ``max_delay``, until the
         value is ready or the ``timeout`` is reached. If the ``timeout`` is
@@ -866,7 +866,7 @@ Huey object
         raised.
 
         .. seealso::
-            :py:class:`Result` - the :py:meth:`~Huey.result` method is simply a
+            :py:class:`Result`. The :py:meth:`~Huey.result` method is a
             wrapper that creates a ``Result`` object and calls its
             :py:meth:`~Result.get` method.
 
@@ -1165,7 +1165,7 @@ Huey object
         :param int retry_delay: number of seconds to wait between retries.
         :param retry_backoff: multiplier applied to the delay after each failed
             attempt. See :py:meth:`~Huey.task`.
-        :param expires: set expiration time for task - if task is not run
+        :param expires: set expiration time for task. If the task is not run
             before ``expires``, it will be discarded. The ``expires`` parameter
             can be either an integer (seconds), a timedelta, or a datetime. For
             relative expiration values, the expire time will be resolved when
@@ -1253,7 +1253,7 @@ Huey object
         :param kwargs: Keyword arguments for task function.
         :param int priority: assign priority override to task, higher numbers
             are processed first by the consumer when there is a backlog.
-        :param expires: set expiration time for task - if task is not run
+        :param expires: set expiration time for task. If the task is not run
             before ``expires``, it will be discarded. The ``expires`` parameter
             can be either an integer (seconds), a timedelta, or a datetime. For
             relative expiration values, the expire time will be resolved when
@@ -1368,7 +1368,7 @@ Huey object
         failed attempt. See :py:meth:`~Huey.task`.
     :param int priority: priority assigned to task, higher numbers are
         processed first by the consumer when there is a backlog.
-    :param expires: set expiration time for task - if task is not run
+    :param expires: set expiration time for task. If the task is not run
         before ``expires``, it will be discarded. The ``expires`` parameter
         can be either an integer (seconds), a timedelta, or a datetime. For
         relative expiration values, the expire time will be resolved when
@@ -1890,7 +1890,7 @@ Result
     Once the consumer finishes executing a task, the return value is placed in
     the result store, allowing the original caller to retrieve it.
 
-    Getting results from tasks is very simple:
+    Getting results from tasks is straightforward:
 
     .. code-block:: python
 
@@ -1965,15 +1965,15 @@ Result
         :raises: ResultTimeout if blocking and timeout specified without result
             becoming ready yet.
 
-        Attempt to retrieve the return value of a task.  By default,
-        :py:meth:`~Result.get` will simply check for the value, returning
+        Attempt to retrieve the return value of a task. By default,
+        :py:meth:`~Result.get` will check for the value, returning
         ``None`` if it is not ready yet. If you want to wait for a value, you
         can specify ``blocking=True``. This will loop, backing off up to the
         provided ``max_delay``, until the value is ready or the ``timeout`` is
         reached. If the ``timeout`` is reached before the result is ready, a
         :py:class:`ResultTimeout` exception will be raised.
 
-        .. note:: Instead of calling ``.get()``, you can simply call the
+        .. note:: Instead of calling ``.get()``, you can call the
             :py:class:`Result` object directly. Both methods accept the same
             arguments.
 

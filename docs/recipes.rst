@@ -434,9 +434,9 @@ purpose task that accepts a dotted import path and calls any function:
     path_task('myapp.utils.reindex', 'products')
 
 .. warning::
-    This pattern is powerful but should be used with care. The function must be
-    importable by the consumer process, and the arguments must be picklable.
-    Avoid exposing this to untrusted input.
+    Use this pattern with care. The function must be importable by the consumer
+    process, and the arguments must be picklable. Since it can invoke any
+    importable callable, do not expose it to untrusted input.
 
 Dynamic periodic tasks
 ----------------------
@@ -721,7 +721,7 @@ tasks module:
             user = User.query.get(user_id)
             mail.send(make_welcome_message(user))
 
-Views simply call the task to enqueue it:
+Views call the task to enqueue it:
 
 .. code-block:: python
 

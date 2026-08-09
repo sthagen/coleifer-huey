@@ -4,27 +4,27 @@ Troubleshooting and Common Pitfalls
 ===================================
 
 This document outlines some of the common pitfalls you may encounter when
-getting set up with huey.  It is arranged in a problem/solution format.
+getting set up with huey. It is arranged in a problem/solution format.
 
 Tasks not running
     First step is to increase logging verbosity by running the consumer with
-    ``--verbose``.  You can also specify a logfile using the ``--logfile``
+    ``--verbose``. You can also specify a logfile using the ``--logfile``
     option.
 
-    Check for any exceptions.  The most common cause of tasks not running is
+    Check for any exceptions. The most common cause of tasks not running is
     that they are not being loaded, in which case you will
     see :py:class:`HueyException` "XXX not found in TaskRegistry" errors.
 
 "HueyException: XXX not found in TaskRegistry" in log file
     Exception occurs when a task is called by a task producer, but is not
-    imported by the consumer.  To fix this, ensure that by loading the
+    imported by the consumer. To fix this, ensure that by loading the
     :py:class:`Huey` object, you also import any decorated functions as well.
 
     For more information on how tasks are imported, see the :ref:`import documentation <imports>`.
 
 "Error importing XXX" when starting consumer
     This error message occurs when the module containing the configuration
-    specified cannot be loaded (not on the pythonpath, mistyped, etc).  One
+    specified cannot be loaded (not on the pythonpath, mistyped, etc). One
     quick way to check is to open up a python shell and try to import the
     configuration.
 
@@ -76,7 +76,7 @@ Task result is stale after a retry
             value = result.get(blocking=True, timeout=30)
 
 Scheduled tasks are not being run at the correct time
-    Check the time on the server the consumer is running on - if different from
+    Check the time on the server the consumer is running on. If it differs from
     the producer this may cause problems. Huey uses UTC internally by default,
     and naive datetimes will be converted from local time to UTC (if local time
     happens to not be UTC).

@@ -4,12 +4,12 @@ Changes in 3.0
 ==============
 
 The 3.0 release of Huey is API-compatible with the previous versions. The main
-change is the addtion of a number of new features:
+change is the addition of a number of new features:
 
 * :py:class:`chord` and :py:class:`group` - :ref:`description <groups-and-chords>`
 * :ref:`task timeouts <task-timeouts>`
 * :ref:`rate limiting <rate-limiting>`
-* low-latency result notification (Redis-only) via ``notify_results=True``.
+* low-latency result notification (Redis-only) via ``notify_result=True``.
 * removed Python 2.x compatibility.
 
 Changes in 2.0
@@ -40,15 +40,13 @@ Previously, the Huey consumer accepted options to run in UTC or local-time.
 Various APIs, particularly around scheduling and task revocation, needed to be
 compatible with however the consumer was configured, and it could easily get
 confusing. As of 2.0, UTC-vs-localtime is specified when instantiating Huey,
-and all conversion happens internally, hopefully making things easier to think
-about -- that is, you don't have to think about it.
+and all conversion happens internally, which should make things easier to
+think about.
 
 The events APIs have been removed and replaced by a :ref:`signals` system.
-Signal handlers are executed synchronously by the worker(s) as they run, so
-it's a bit different, but hopefully a lot easier to actually utilize, as the
-events API required a dedicated listener thread if you were to make any use of
-it (since it used a pub/sub approach). Events could be built on-top of the
-signals, but currently I have no plans for this.
+Signal handlers are executed synchronously by the worker(s) as they run, which
+is easier to use than the events API. That API used a pub/sub approach and
+required a dedicated listener thread to make any use of it.
 
 Errors are no longer stored in a separate list. Should a task fail due to an
 unhandled exception, the exception will be placed in the result store, and can
@@ -71,9 +69,8 @@ Changes when initializing :py:class:`Huey`:
   list of recent errors. Unhandled errors that occur when running a task are
   stored in the result store. Also the ``max_errors`` parameter of the Redis
   storage engine is removed.
-* ``global_registry`` parameter is removed. Tasks are no longer registered to a
-  global registry - tasks are registered to the Huey instance with which they
-  are decorated.
+* ``global_registry`` parameter is removed. Tasks are registered to the Huey
+  instance with which they are decorated, rather than to a global registry.
 * ``always_eager`` has been renamed ``immediate``.
 
 New initialization arguments:

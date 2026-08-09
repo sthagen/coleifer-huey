@@ -3,12 +3,12 @@
 Mini-Huey
 ---------
 
-:py:class:`MiniHuey` provides a very lightweight huey-like API that may be
-useful for certain applications. The ``MiniHuey`` consumer runs inside a
-greenlet in your main application process.  This means there is no separate
-consumer process to manage, nor is there any persistence for the
-enqueued/scheduled tasks; whenever a task is enqueued or is scheduled to run, a
-new greenlet is spawned to execute the task.
+:py:class:`MiniHuey` provides a lightweight huey-like API that may be useful
+for certain applications. The ``MiniHuey`` consumer runs inside a greenlet in
+your main application process. This means there is no separate consumer process
+to manage, and no persistence for the enqueued or scheduled tasks. Whenever a
+task is enqueued or is scheduled to run, a new greenlet is spawned to execute
+it.
 
 *MiniHuey* may be useful if:
 
@@ -43,7 +43,7 @@ Usage and task declaration:
 
         Task decorator similar to :py:meth:`Huey.task` or :py:meth:`Huey.periodic_task`.
         For tasks that should be scheduled automatically at regular intervals,
-        simply provide a suitable :py:func:`crontab` definition.
+        provide a suitable :py:func:`crontab` definition.
 
         The decorated task will gain a ``schedule()`` method which can be used
         like the :py:meth:`TaskWrapper.schedule` method.

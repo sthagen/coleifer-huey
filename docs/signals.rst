@@ -263,9 +263,9 @@ Using SIGNAL_INTERRUPTED
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
 The correct way to shut-down the Huey consumer is to send a ``SIGINT`` signal
-to the worker process (e.g. Ctrl+C) - this initiates a graceful shutdown.
-Sometimes, however, you may need to shutdown the consumer using ``SIGTERM`` -
-this immediately stops the consumer. Any tasks that are currently being
+to the worker process (e.g. Ctrl+C), which initiates a graceful shutdown.
+Sometimes, however, you may need to shut the consumer down using ``SIGTERM``,
+which stops it immediately. Any tasks that are currently being
 executed are then "lost" and will not be retried by default (see also:
 :ref:`consumer-shutdown`).
 
@@ -325,11 +325,10 @@ Performance considerations
 
 Signal handlers are executed **synchronously** by the consumer as it processes
 tasks (with the exception of ``SIGNAL_ENQUEUED``, which also runs in your
-application process). It is important to use care when implementing signal
-handlers, as one slow signal handler can impact the overall responsiveness of
-the consumer.
+application process). Take care when implementing them, as one slow handler
+can impact the overall responsiveness of the consumer.
 
-For example, if you implement a signal handler that posts some data to REST
+For example, if you implement a signal handler that posts data to a REST
 API, everything might work fine until the REST API goes down or stops being
 responsive, which will cause the signal handler to block, which then prevents
 the consumer from moving on to the next task.

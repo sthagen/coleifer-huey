@@ -3,16 +3,15 @@
 Consuming Tasks
 ===============
 
-To run the consumer, simply point it at the "import path" to your application's
+To run the consumer, point it at the "import path" to your application's
 :py:class:`Huey` instance. For example, here is how I run it on my blog:
 
 .. code-block:: shell
 
     huey_consumer blog.main.huey --logfile=../logs/huey.log
 
-The concept of the "import path" has been the source of a few questions, but
-it is quite simple. It is simply the dotted-path you might use if you were
-to try and import the "huey" object in the interactive interpreter:
+The "import path" is the dotted-path you would use to import the "huey" object
+in the interactive interpreter:
 
 .. code-block:: pycon
 
@@ -28,7 +27,7 @@ work around this:
 3. Create a wrapper and hack ``sys.path``.
 
 .. warning::
-    If you plan to use `supervisord <http://supervisord.org/>`_ to manage your
+    If you plan to use `supervisord <https://supervisord.org/>`_ to manage your
     consumer process, be sure that you are running the consumer directly and
     without any intermediary shell scripts. Shell script wrappers interfere
     with supervisor's ability to terminate and restart the consumer Python
@@ -43,9 +42,8 @@ The following table lists the options available for the consumer as well as
 their default values.
 
 ``-l``, ``--logfile``
-    Path to file used for logging.  When a file is specified, by default Huey
-    the logfile will grow indefinitely, so you may wish to configure a tool
-    like ``logrotate``.
+    Path to file used for logging. The logfile grows indefinitely, so you may
+    wish to configure a tool like ``logrotate``.
 
     Alternatively, you can attach your own handler to ``huey.consumer``.
 
@@ -65,15 +63,11 @@ their default values.
     Use a simple log format consisting only of the time H:M:S and log message.
 
 ``-w``, ``--workers``
-    Number of worker threads/processes/greenlets, the default is ``1`` but
-    most applications will want to increase this number for greater throughput.
-    Even if you have a small workload, you will typically want to increase this
-    number to at least 2 just in case one worker gets tied up on a slow task.
-    If you have a CPU-intensive workload, you may want to increase the number
-    of workers to the number of CPU cores (or 2x CPU cores). Lastly, if you are
-    using the ``greenlet`` worker type, you can easily run tens or hundreds of
-    workers as they are extremely lightweight (however make sure, when using
-    Redis, that you create a large enough pool for all these connections).
+    Number of worker threads/processes/greenlets. The default is ``1``, but
+    most applications will want at least 2, so a slow task cannot tie up the
+    only worker. For CPU-bound workloads, scale toward the number of CPU cores.
+    With the ``greenlet`` worker type you can run hundreds of workers, but when
+    using Redis, size the connection pool to match.
 
 ``-k``, ``--worker-type``
     Choose the worker type, ``thread``, ``process`` or ``greenlet``. The
@@ -102,12 +96,12 @@ their default values.
 
 ``-n``, ``--no-periodic``
     Indicate that this consumer process should *not* enqueue periodic tasks.
-    If you do not plan on using the periodic task feature, feel free to use
-    this option to save a few CPU cycles.
+    When running multiple consumers against one queue, all but one should use
+    this so periodic tasks are enqueued once rather than once per consumer.
 
 ``-d``, ``--delay``
     When using a "polling"-type queue backend, this is the number of seconds to
-    wait when polling the backend.  Default is 0.1 seconds. For example, when
+    wait when polling the backend. Default is 0.1 seconds. For example, when
     the consumer starts up it will begin polling every 0.1 seconds. If no tasks
     are found in the queue, it will multiply the current delay (0.1) by the
     backoff parameter. When a task is received, the polling interval will reset
@@ -119,28 +113,21 @@ their default values.
     action, you can increase this number to reduce CPU usage.
 
 ``-b``, ``--backoff``
-    The amount to back-off when polling for results.  Must be greater than
-    one.  Default is 1.15. This parameter controls the rate at which the
+    The amount to back-off when polling for results. Must be greater than
+    one. Default is 1.15. This parameter controls the rate at which the
     interval increases after successive attempts return no tasks. Here is how
     the defaults, 0.1 initial and 1.15 backoff, look:
 
-    .. image:: http://media.charlesleifer.com/blog/photos/p1472257818.22.png
+    .. image:: https://media.charlesleifer.com/blog/photos/p1472257818.22.png
 
 ``-c``, ``--health-check-interval``
-    This parameter specifies how often huey should check on the status of the
-    workers, restarting any that died for some reason. I personally run a dozen
-    or so huey consumers at any given time and have never encountered an issue
-    with the workers, but I suppose anything's possible and better safe than
-    sorry.
+    How often huey checks the status of the workers, restarting any that died.
+    Default is 10 seconds.
 
 ``-C``, ``--disable-health-check``
-    This option **disables** the worker health checks. Until version 1.3.0,
-    huey had no concept of a "worker health check" because in my experience the
-    workers simply always stayed up and responsive. But if you are using huey
-    for critical tasks, you may want the insurance of having additional
-    monitoring to make sure your workers stay up and running. At any rate, I
-    feel comfortable saying that it's perfectly fine to use this option and
-    disable worker health checks.
+    Disable the worker health checks. Leaving them enabled is cheap and lets
+    the consumer restart workers that die, so most deployments should keep the
+    default.
 
 ``-f``, ``--flush-locks``
     Flush all locks when starting the consumer. This may be useful if the
@@ -160,6 +147,7 @@ their default values.
 ``-s``, ``--scheduler-interval``
     The frequency with which the scheduler should run. By default this will run
     every second, but you can increase the interval to as much as 60 seconds.
+    The value must divide evenly into 60.
 
 Examples
 ^^^^^^^^
@@ -199,20 +187,20 @@ The consumer consists of a main process, a scheduler, and one or more workers.
 These individual components all run concurrently, and Huey supports three
 different mechanisms to achieve this concurrency.
 
-* *thread*, the default - uses OS threads. Due to Python's global interpreter
+* *thread*, the default, uses OS threads. Due to Python's global interpreter
   lock, only one thread can be running at a time, but this is actually less of
   a limitation than it might sound. The Python runtime can intelligently switch
   the running thread when an I/O occurs or when a thread is idle. If the worker
   is CPU-bound, the runtime will pre-emptively switch threads after a given
   number of operations, ensuring each thread gets a chance to make progress.
   Threads provide a good balance of performance and memory efficiency.
-* *process* - runs the scheduler and worker(s) in their own process. The main
+* *process* runs the scheduler and worker(s) in their own process. The main
   benefit over threads is the absence of the global interpreter lock, which
   allows CPU-bound workers to execute in parallel. Since each process maintains
   its own copy of the code in memory, it is likely that processes will require
   more memory than threads or greenlets. Processes are a good choice for tasks
   that perform CPU-intensive work.
-* *greenlet* - runs the scheduler and worker(s) in greenlets. Requires `gevent <https://gevent.org/>`_,
+* *greenlet* runs the scheduler and worker(s) in greenlets. Requires `gevent <https://gevent.org/>`_,
   a cooperative multi-tasking library. When a task performs an operation that
   would be blocking (read or write on a socket), the file descriptor is added
   to an event loop managed by gevent, and the scheduler will switch tasks.
@@ -421,11 +409,10 @@ result-store, Redis or another network-accessible storage backend must be used.
 Consumer Internals
 ------------------
 
-This section will attempt to explain what happens when you call a
-``task``-decorated function in your application. To do this, we will go into
-the implementation of the consumer. The `code for the consumer <https://github.com/coleifer/huey/blob/master/huey/consumer.py>`_
-itself is actually quite short (couple hundred lines), and I encourage you to
-check it out.
+This section explains what happens when you call a ``task``-decorated function
+in your application, by walking through the implementation of the consumer. The
+`code for the consumer <https://github.com/coleifer/huey/blob/master/huey/consumer.py>`_
+is short (a couple hundred lines), and worth reading alongside this section.
 
 The consumer is composed of three components: a master process, the scheduler,
 and the worker(s). Depending on the worker type chosen, the scheduler and
@@ -441,7 +428,7 @@ your tasks, respectively.
    and one of the workers will receive your message indicating which task to
    run, when to run it, and with what parameters.
 3. The worker looks at the message and checks to see if it can be run (i.e.,
-   was this message "revoked"? Is it scheduled to actually run later?).  If it
+   was this message "revoked"? Is it scheduled to actually run later?). If it
    is revoked, the message is thrown out. If it is scheduled to run later, it
    gets added to the schedule. Otherwise, it is executed.
 4. The worker executes the task. If the task finishes, any results are stored
@@ -455,7 +442,7 @@ your tasks, respectively.
    "lost".
 
 While all the above is going on with the Worker(s), the Scheduler is looking at
-its schedule to see if any tasks are ready to be executed.  If a task is ready
+its schedule to see if any tasks are ready to be executed. If a task is ready
 to run, it is enqueued and will be processed by the next available worker.
 
 If you are using the Periodic Task feature (cron), then every minute, the

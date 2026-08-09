@@ -5,7 +5,7 @@ Task statistics
 
 :py:func:`enable_stats` attaches a lightweight recorder to a :py:class:`Huey`
 instance that persists task signals (enqueued, executing, complete, error,
-retrying, and so on) into a pair of `peewee <http://docs.peewee-orm.com/>`_
+retrying, and so on) into a pair of `peewee <https://docs.peewee-orm.com/>`_
 tables. From those tables you can compute throughput, error-rates, per-task
 timing and a live view of what is currently running.
 

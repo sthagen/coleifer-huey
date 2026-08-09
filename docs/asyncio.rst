@@ -9,7 +9,7 @@ blocking while waiting for a task result to be ready. When waiting for a task
 result, Huey must poll the storage backend to determine if the result is ready
 which means lots of opportunity for an asynchronous solution.
 
-In order to simplify this, Huey provides two helpers for ``await``-ing task
+To simplify this, Huey provides two helpers for ``await``-ing task
 results. For a complete example of wiring Huey into an async web application,
 see :ref:`recipe-fastapi`.
 

@@ -792,6 +792,8 @@ class TestQueue(BaseTestCase):
         err = self.trap_exception(re)
         self.assertEqual(err.metadata['error'], 'TestError(uh-oh)')
         self.assertEqual(err.metadata['retries'], 0)
+        self.assertIn('TestError', err.metadata['traceback'])
+        self.assertIn('uh-oh', err.metadata['traceback'])
 
         self.assertEqual(self.huey.result_count(), 0)
         self.assertEqual(len(self.huey), 0)

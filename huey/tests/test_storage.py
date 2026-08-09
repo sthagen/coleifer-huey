@@ -609,6 +609,28 @@ class TestFileStorageMethods(StorageTests, BaseTestCase):
         for i in range(nthreads * ntasks):
             self.assertEqual(in_q.get(), out_q.get())
 
+    def test_fs_threaded_file_lock(self):
+        # Regression: FileLock shared one fd across threads. Contention
+        # clobbered it, leaking a held flock and wedging every process.
+        storage = FileStorage('lock-test', path=self.path)
+        done = []
+
+        def spin(n):
+            for i in range(n):
+                storage.enqueue(b'x')
+                storage.dequeue()
+            done.append(n)
+
+        threads = []
+        for i in range(4):
+            t = threading.Thread(target=spin, args=(100,))
+            t.daemon = True
+            threads.append(t)
+
+        for t in threads: t.start()
+        for t in threads: t.join(timeout=15.)
+        self.assertEqual(done, [100, 100, 100, 100])
+
     @unittest.skipIf(CI, 'skipping test that is flaky on CI')
     def test_consumer_integration(self):
         return super(TestFileStorageMethods, self).test_consumer_integration()

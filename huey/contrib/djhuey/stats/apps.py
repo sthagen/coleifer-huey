@@ -29,6 +29,10 @@ def stats_database():
     kwargs = {k: v for k, v in kwargs.items() if v}
     if 'port' in kwargs:
         kwargs['port'] = int(kwargs['port'])
+    # OPTIONS are passed verbatim to the driver, except keys Django consumes.
+    skip = ('assume_role', 'isolation_level', 'pool', 'server_side_binding')
+    kwargs.update({k: v for k, v in (conn.get('OPTIONS') or {}).items()
+                   if k not in skip})
     if engine in ('postgresql', 'postgresql_psycopg2', 'postgis'):
         return peewee.PostgresqlDatabase(conn['NAME'], **kwargs), options
     elif engine == 'mysql':

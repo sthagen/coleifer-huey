@@ -31,7 +31,7 @@ huey supports:
 * task pipelines and chains
 * groups (fan-out), chords (map / reduce)
 
-.. image:: http://i.imgur.com/2EpRs.jpg
+.. image:: https://i.imgur.com/2EpRs.jpg
 
 At a glance
 -----------
@@ -149,4 +149,4 @@ Project page
 
 Huey is named in honor of my cat:
 
-.. image:: http://m.charlesleifer.com/t/800x-/blog/photos/p1473037658.76.jpg?key=mD9_qMaKBAuGPi95KzXYqg
+.. image:: https://m.charlesleifer.com/t/800x-/blog/photos/p1473037658.76.jpg?key=mD9_qMaKBAuGPi95KzXYqg

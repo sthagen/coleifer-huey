@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import warnings
 try:
@@ -125,7 +126,9 @@ class FileLock(object):
             warnings.warn('FileLock not supported on this platform. Please '
                           'use a different storage implementation.')
         self.filename = filename
-        self.fd = None
+        # Each thread flocks its own fd. A shared fd is clobbered under
+        # thread contention, leaking the flock and deadlocking every process.
+        self._local = threading.local()
 
         dirname = os.path.dirname(filename)
         if not os.path.exists(dirname):
@@ -133,13 +136,14 @@ class FileLock(object):
 
     def acquire(self):
         flags = os.O_CREAT | os.O_TRUNC | os.O_RDWR
-        self.fd = os.open(self.filename, flags)
+        self._local.fd = fd = os.open(self.filename, flags)
         if fcntl is not None:
-            fcntl.flock(self.fd, fcntl.LOCK_EX)
+            fcntl.flock(fd, fcntl.LOCK_EX)
 
     def release(self):
-        if self.fd is not None:
-            fd, self.fd = self.fd, None
+        fd = getattr(self._local, 'fd', None)
+        if fd is not None:
+            self._local.fd = None
             if fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
