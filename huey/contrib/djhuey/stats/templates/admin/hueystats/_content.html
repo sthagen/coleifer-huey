@@ -46,6 +46,7 @@ for start-up errors from <code>huey.contrib.djhuey.stats</code>.</p>
           <td class="hs-r {% if s.errors %}hs-err{% else %}hs-quiet{% endif %}">{{ s.errors }}</td>
           <td class="hs-r">{{ s.avg|dur }}</td>
           <td class="hs-r">
+            {% if t.registered and can_act %}
             <form method="post" action="{% url 'admin:hueystats_dashboard_action' %}" class="hs-act">
               {% csrf_token %}
               <input type="hidden" name="task" value="{{ t.full }}">
@@ -57,10 +58,11 @@ for start-up errors from <code>huey.contrib.djhuey.stats</code>.</p>
                 <button class="hs-btn hs-btn-danger">Revoke</button>
               {% endif %}
             </form>
+            {% endif %}
           </td>
         </tr>
       {% endwith %}{% empty %}
-        <tr><td colspan="6" class="hs-empty">No registered tasks.</td></tr>
+        <tr><td colspan="6" class="hs-empty">No tasks seen yet.</td></tr>
       {% endfor %}
       </tbody>
     </table>
@@ -84,7 +86,8 @@ for start-up errors from <code>huey.contrib.djhuey.stats</code>.</p>
 </div>
 
 <div class="module hs-mod">
-  <h2>Recent events</h2>
+  <h2>Recent events &middot;
+      <a class="hs-hlink" href="{% url 'admin:hueystats_dashboard_events' %}">view all</a></h2>
   <table class="hs-tbl">
     <thead><tr><th>Time</th><th>Task</th><th>Signal</th>
                <th class="hs-r">Duration</th><th>Error</th></tr></thead>
@@ -115,12 +118,14 @@ for start-up errors from <code>huey.contrib.djhuey.stats</code>.</p>
             <td class="hs-mono hs-quiet">{{ p.id|slice:":8" }}</td>
             <td class="hs-r">{{ p.priority|default_if_none:0 }}</td>
             <td class="hs-r">
+              {% if can_act %}
               <form method="post" action="{% url 'admin:hueystats_dashboard_action' %}" class="hs-act">
                 {% csrf_token %}
                 <input type="hidden" name="op" value="revoke_id">
                 <input type="hidden" name="id" value="{{ p.id }}">
                 <button class="hs-btn hs-btn-danger">Revoke</button>
               </form>
+              {% endif %}
             </td></tr>
       {% empty %}
         <tr><td colspan="4" class="hs-empty">Queue empty.</td></tr>
@@ -138,12 +143,14 @@ for start-up errors from <code>huey.contrib.djhuey.stats</code>.</p>
             <td class="hs-mono hs-quiet">{{ s.id|slice:":8" }}</td>
             <td>{{ s.eta|default_if_none:"—" }}</td>
             <td class="hs-r">
+              {% if can_act %}
               <form method="post" action="{% url 'admin:hueystats_dashboard_action' %}" class="hs-act">
                 {% csrf_token %}
                 <input type="hidden" name="op" value="revoke_id">
                 <input type="hidden" name="id" value="{{ s.id }}">
                 <button class="hs-btn hs-btn-danger">Revoke</button>
               </form>
+              {% endif %}
             </td></tr>
       {% empty %}
         <tr><td colspan="4" class="hs-empty">Nothing scheduled.</td></tr>
@@ -153,6 +160,7 @@ for start-up errors from <code>huey.contrib.djhuey.stats</code>.</p>
   </div>
 </div>
 
+{% if can_act %}
 <div class="module hs-mod">
   <h2>Danger zone</h2>
   <div class="hs-pad hs-danger-zone">
@@ -166,5 +174,6 @@ for start-up errors from <code>huey.contrib.djhuey.stats</code>.</p>
     {% endfor %}
   </div>
 </div>
+{% endif %}
 
 {% endif %}

@@ -34,6 +34,8 @@ requires_postgres = unittest.skipIf(not pg_available(),
 
 @requires_postgres
 class TestPostgresStorage(StorageTests, BaseTestCase):
+    supports_ttl = False
+
     def get_huey(self, **kwargs):
         kwargs.setdefault('read_timeout', 0.1)
         return PostgresHuey('test-pg', dsn=PG_DSN, utc=False, **kwargs)

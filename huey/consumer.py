@@ -33,8 +33,9 @@ class WorkerRecycle(Exception): pass
 class BaseProcess(object):
     process_name = 'BaseProcess'
 
-    def __init__(self, huey):
+    def __init__(self, huey, stop_flag):
         self.huey = huey
+        self.stop_flag = stop_flag
         self._logger = self.create_logger()
 
     def create_logger(self):
@@ -60,7 +61,7 @@ class BaseProcess(object):
         # pre-empted by the kernel while logging.
         sleep_time = nseconds - (time.monotonic() - start_ts)
         if sleep_time > 0:
-            time.sleep(sleep_time)
+            self.stop_flag.wait(sleep_time)
 
     def loop(self, now=None):
         """
@@ -87,14 +88,14 @@ class Worker(BaseProcess):
     """
     process_name = 'Worker'
 
-    def __init__(self, huey, default_delay, max_delay, backoff,
+    def __init__(self, huey, stop_flag, default_delay, max_delay, backoff,
                  max_tasks=None):
         self.delay = self.default_delay = default_delay
         self.max_delay = max_delay
         self.backoff = backoff
         self.max_tasks = max_tasks
         self.task_count = 0
-        super(Worker, self).__init__(huey)
+        super(Worker, self).__init__(huey, stop_flag)
 
     def initialize(self):
         for name, startup_hook in self.huey._startup.items():
@@ -140,7 +141,7 @@ class Worker(BaseProcess):
         if self.delay > self.max_delay:
             self.delay = self.max_delay
 
-        time.sleep(self.delay)
+        self.stop_flag.wait(self.delay)
         self.delay *= self.backoff
 
 
@@ -156,8 +157,8 @@ class Scheduler(BaseProcess):
     periodic_task_seconds = 60
     process_name = 'Scheduler'
 
-    def __init__(self, huey, interval, periodic):
-        super(Scheduler, self).__init__(huey)
+    def __init__(self, huey, stop_flag, interval, periodic):
+        super(Scheduler, self).__init__(huey, stop_flag)
         self.interval = max(min(interval, 60), 1)
 
         self.periodic = periodic
@@ -294,7 +295,8 @@ class Consumer(object):
                  backoff=1.15, max_delay=10.0, scheduler_interval=1,
                  worker_type=WORKER_THREAD, check_worker_health=True,
                  health_check_interval=10, flush_locks=False,
-                 extra_locks=None, max_tasks=None):
+                 extra_locks=None, max_tasks=None, shutdown_timeout=None,
+                 graceful_signal='INT'):
 
         self._logger = logging.getLogger('huey.consumer')
         if huey.immediate:
@@ -309,6 +311,8 @@ class Consumer(object):
         self.backoff = backoff  # Exponential backoff factor when queue empty.
         self.max_delay = max_delay  # Maximum interval between polling events.
         self.max_tasks = max_tasks  # Max tasks to execute before recycling.
+        self.shutdown_timeout = shutdown_timeout
+        self.graceful_signal = graceful_signal
 
         if max_tasks and not check_worker_health:
             raise ConfigurationError('max_tasks requires check_worker_health '
@@ -344,6 +348,10 @@ class Consumer(object):
         self._restart = False
         self._graceful = True
         self.stop_flag = self.environment.get_stop_flag()
+        if graceful_signal == 'TERM':
+            self._signals = (signal.SIGTERM, signal.SIGINT)
+        else:
+            self._signals = (signal.SIGINT, signal.SIGTERM)
 
         # In the event the consumer was killed while running a task that held
         # a lock, this ensures that all locks are flushed before starting.
@@ -382,6 +390,7 @@ class Consumer(object):
     def _create_worker(self):
         return self.worker_class(
             huey=self.huey,
+            stop_flag=self.stop_flag,
             default_delay=self.default_delay,
             max_delay=self.max_delay,
             backoff=self.backoff,
@@ -390,6 +399,7 @@ class Consumer(object):
     def _create_scheduler(self):
         return self.scheduler_class(
             huey=self.huey,
+            stop_flag=self.stop_flag,
             interval=self.scheduler_interval,
             periodic=self.periodic)
 
@@ -461,26 +471,58 @@ class Consumer(object):
         Set the stop-flag.
 
         If `graceful=True`, this method blocks until the workers to finish
-        executing any tasks they might be currently working on.
+        executing any tasks they might be currently working on, or until
+        `shutdown_timeout` elapses.
         """
         self.stop_flag.set()
         if graceful:
             self._logger.info('Shutting down gracefully...')
             try:
-                for _, worker_process in self.worker_threads:
-                    worker_process.join()
-                self.scheduler.join()
+                success = self._join_workers()
             except KeyboardInterrupt:
                 self._logger.info('Received request to shut down now.')
                 self._restart = False
-            else:
+                self._interrupt_workers()
+                return
+            if success:
                 self._logger.info('All workers have stopped.')
-        else:
-            if self.worker_type == WORKER_GREENLET:
-                # Interrupt worker greenlets that are blocked on I/O.
-                gevent.killall([t for _, t in self.worker_threads],
-                               KeyboardInterrupt)
-            self._logger.info('Shutting down')
+                return
+            self._logger.warning('Shutdown timeout of %ss elapsed, '
+                                 'interrupting workers.',
+                                 self.shutdown_timeout)
+        self._interrupt_workers()
+        self._logger.info('Shutting down')
+
+    def _interrupt_workers(self):
+        if self.worker_type == WORKER_GREENLET:
+            # Interrupt worker greenlets that are blocked on I/O.
+            gevent.killall([t for _, t in self.worker_threads],
+                           KeyboardInterrupt)
+        elif self.worker_type == WORKER_PROCESS:
+            # The mp exit handler terminates children w/SIGTERM, which they
+            # ignore when it is the graceful signal.
+            for _, proc in self.worker_threads:
+                if self.environment.is_alive(proc):
+                    try:
+                        os.kill(proc.pid, self._signals[1])
+                    except OSError:
+                        pass
+            # Brief join so the exit handler cannot interrupt mid-cleanup.
+            deadline = time.monotonic() + 1
+            for _, proc in self.worker_threads:
+                proc.join(max(deadline - time.monotonic(), 0))
+
+    def _join_workers(self):
+        deadline = None
+        if self.shutdown_timeout is not None:
+            deadline = time.monotonic() + self.shutdown_timeout
+        procs = [p for _, p in self.worker_threads] + [self.scheduler]
+        for proc in procs:
+            if deadline is None:
+                proc.join()
+            else:
+                proc.join(max(deadline - time.monotonic(), 0))
+        return not any(self.environment.is_alive(p) for p in procs)
 
     def run(self):
         """
@@ -568,31 +610,29 @@ class Consumer(object):
         return not restart_occurred
 
     def _set_signal_handlers(self):
-        signal.signal(signal.SIGTERM, self._handle_stop_signal)
-        if self.worker_type in (WORKER_GREENLET, WORKER_THREAD):
-            # Add a special INT handler when using gevent. If the running
-            # greenlet is not the main hub, then Gevent will raise a
-            # KeyboardInterrupt in the running greenlet by default. This
-            # ensures that when INT is received we properly flag the main loop
-            # for graceful shutdown and do NOT propagate the exception.
-            # This is also added for threads to ensure that, in the event of a
-            # SIGHUP followed by a SIGINT, we respect the SIGINT.
-            signal.signal(signal.SIGINT, self._handle_interrupt_signal_gevent)
-        else:
+        graceful, interrupt = self._signals
+        signal.signal(interrupt, self._handle_stop_signal)
+        if graceful == signal.SIGINT and self.worker_type == WORKER_PROCESS:
             signal.signal(signal.SIGINT, signal.default_int_handler)
+        else:
+            # Add a special handler for the graceful signal. For gevent, if
+            # the running greenlet is not the main hub, then Gevent will raise
+            # a KeyboardInterrupt in the running greenlet by default on INT.
+            # This ensures that when the signal is received we properly flag
+            # the main loop for graceful shutdown and do NOT propagate the
+            # exception. This is also added for threads to ensure that, in the
+            # event of a SIGHUP followed by a SIGINT, we respect the SIGINT.
+            signal.signal(graceful, self._handle_graceful_signal)
         if hasattr(signal, 'SIGHUP'):
             signal.signal(signal.SIGHUP, self._handle_restart_signal)
 
-    # Note: the signal handlers below only set simple flags. Logging (and, for
-    # greenlet workers, killing the worker greenlets) happens in the main loop
-    # and stop() -- neither is safe to perform in a signal handler.
-
-    def _handle_interrupt_signal_gevent(self, sig_num, frame):
+    # Note: the signal handlers below only set simple flags.
+    def _handle_graceful_signal(self, sig_num, frame):
         self._received_signal = True
         self._signum = sig_num
         self._restart = False
         self._graceful = True
-        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(sig_num, signal.default_int_handler)
 
     def _handle_stop_signal(self, sig_num, frame):
         self._received_signal = True
@@ -608,12 +648,13 @@ class Consumer(object):
 
     def _set_child_signal_handlers(self):
         # Install signal handlers in child process. We ignore SIGHUP (restart)
-        # and SIGINT (graceful shutdown), as these are handled by the main
-        # process. Upon a TERM signal, we raise a KeyboardInterrupt, which is
+        # and the graceful signal, as these are handled by the main process.
+        # Upon the interrupt signal, we raise a KeyboardInterrupt, which is
         # caught below (and in the worker execute() code), to allow immediate
         # shutdown.
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, self._handle_stop_signal_worker)
+        graceful, interrupt = self._signals
+        signal.signal(graceful, signal.SIG_IGN)
+        signal.signal(interrupt, self._handle_stop_signal_worker)
         if hasattr(signal, 'SIGHUP'):
             signal.signal(signal.SIGHUP, signal.SIG_IGN)
 

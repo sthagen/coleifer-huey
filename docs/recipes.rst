@@ -254,13 +254,23 @@ shutdown (``SIGINT``) before supervisor sends ``SIGTERM``:
 .. code-block:: ini
 
     [program:my_huey]
-    command=/path/to/venv/bin/huey_consumer my_app.huey -w 4
+    command=/path/to/venv/bin/huey_consumer my_app.huey -w 4 -t 20
     stopwaitsecs=30
     stopsignal=INT
 
 With this configuration, supervisor sends ``SIGINT`` first, waits 30 seconds
 for a graceful shutdown, and only sends ``SIGTERM`` if the consumer is still
-running.
+running. Where the stop signal cannot be configured, ``--graceful-signal=TERM``
+makes ``SIGTERM`` the graceful signal instead.
+
+We can simplify this by specifying a graceful shutdown timeout, and instruct
+Huey to treat ``SIGTERM`` as the graceful shutdown signal. Here we will give
+tasks 10 seconds to finish before interrupting them:
+
+.. code-block:: ini
+
+    [program:my_huey]
+    command=/path/to/venv/bin/huey_consumer my_app.huey -w 4 -t 10 -g TERM
 
 .. _recipe-monitoring:
 

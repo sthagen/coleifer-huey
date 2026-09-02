@@ -36,6 +36,10 @@ Huey types
         enable low-latency result reading.
     :param int notify_result_ttl: TTL for result-ready key to automatically
         expire un-awaited results.
+    :param bool clean_name: strip non-alphanumeric characters from the name
+        when building Redis keys. Default is true, so ``app-v1`` and ``appv1``
+        share keys. Pass false to use the name verbatim (this will become the
+        default in a future release).
 
     The `redis-py documentation <https://redis-py.readthedocs.io/en/latest/>`_
     contains the complete list of arguments supported by the Redis client.
@@ -53,7 +57,7 @@ Huey types
     For low-latency result-fetching, you can specify ``notify_result=True``
     when instantiating ``RedisHuey`` (or subclasses). This works by
     coordinating result readiness through a blocking pop on a dedicated result
-    list. By default this result-readiness list will expire after 86400 seconds,
+    list. By default this result-readiness list will expire after 60 seconds,
     but this can be controlled with the ``notify_result_ttl`` parameter.
     **All RedisHuey** implementations support these options.
 
@@ -820,6 +824,9 @@ Huey object
 
         :param task: either a task instance, a task ID, a Result, or a Task class.
 
+        A task ID only reflects revocation via :py:meth:`~Huey.revoke_by_id`.
+        Class-level revocation requires a task instance, Result or task class.
+
         This method should rarely need to be called directly. Typically you
         should rather use the ``is_revoked`` method on the object that is being
         revoked, for example:
@@ -880,9 +887,15 @@ Huey object
             methods). If you intend to access the task result multiple times,
             you must specify ``preserve=True`` when calling these methods.
 
-    .. py:method:: lock_task(lock_name)
+    .. py:method:: lock_task(lock_name, ttl=None)
 
         :param str lock_name: Name to use for the lock.
+        :param int ttl: Seconds after which the lock expires on its own, so a
+            killed worker cannot hold it forever. Supported by the memory and
+            redis storages, others raise ``NotImplementedError``. With
+            :py:class:`RedisStorage` the server must support hash-field TTL
+            (redis 7.4+ or valkey 9+). :py:class:`RedisExpireStorage` works
+            on any version.
         :returns: :py:class:`TaskLock` instance, which can be used as a
             decorator or context-manager.
 
@@ -1065,10 +1078,14 @@ Huey object
         Remove a value from the result-store at the given key. Useful for
         cleaning up manually-stored data created with :py:meth:`~Huey.put`.
 
-    .. py:method:: put_if_empty(key, value)
+    .. py:method:: put_if_empty(key, value, ttl=None)
 
         :param key: key to store data under.
         :param value: arbitrary data to store.
+        :param int ttl: seconds until the key expires. Supported by the memory
+            and redis storages, others raise ``NotImplementedError``. With
+            :py:class:`RedisStorage` the server must support hash-field TTL
+            (redis 7.4+ or valkey 9+).
         :returns: boolean indicating whether the value was stored. Returns
             ``False`` if the key already exists.
 
@@ -1126,13 +1143,10 @@ Huey object
         Return the number of items currently in the queue.
 
 
-.. py:class:: TaskWrapper(huey, func, retries=None, retry_delay=None, context=False, name=None, task_base=None, **settings)
+.. py:class:: TaskWrapper(huey, func, context=False, name=None, task_base=None, **settings)
 
     :param Huey huey: A huey instance.
     :param func: User function.
-    :param int retries: Upon failure, number of times to retry the task.
-    :param int retry_delay: Number of seconds to wait before retrying after a
-        failure/exception.
     :param bool context: when the task is executed, include the
         :py:class:`Task` instance as a parameter.
     :param str name: Name for task (will be determined based on task module and
@@ -1146,6 +1160,9 @@ Huey object
 
     The wrapper class, when called, will enqueue the requested function call
     for execution by the consumer.
+
+    The ``retries`` and ``retry_delay`` attributes reflect the values the task
+    was declared with.
 
     .. note::
         You should not need to create :py:class:`TaskWrapper` instances
@@ -1251,6 +1268,7 @@ Huey object
 
         :param args: Arguments for task function.
         :param kwargs: Keyword arguments for task function.
+        :param str id: explicit task id, defaults to a random UUID.
         :param int priority: assign priority override to task, higher numbers
             are processed first by the consumer when there is a backlog.
         :param expires: set expiration time for task. If the task is not run
@@ -1275,8 +1293,8 @@ Huey object
         .. warning::
             The following keyword argument names are reserved and will be
             intercepted by Huey rather than passed to your task function:
-            ``eta``, ``delay``, ``retries``, ``retry_delay``, ``priority``,
-            ``expires``, and ``timeout``. If your task function has a parameter
+            ``id``, ``eta``, ``delay``, ``retries``, ``retry_delay``,
+            ``retry_backoff``, ``priority``, ``expires``, and ``timeout``. If your task function has a parameter
             with one of these names, rename the parameter or pass the value
             positionally.
 
@@ -1535,7 +1553,7 @@ Huey object
     Convenience function for a task that should run daily, at midnight.
 
 
-.. py:class:: TaskLock(huey, name)
+.. py:class:: TaskLock(huey, name, ttl=None)
 
     This class should not be instantiated directly, but is instead returned by
     :py:meth:`Huey.lock_task`. This object implements a context-manager or
@@ -1949,6 +1967,11 @@ Result
         :returns: whether the task result value is available.
         :rtype: bool
 
+        Reads the result into this handle, so a ready result is always
+        readable by the caller. Results are read-once, so another
+        :py:class:`Result` for the same task will not see it, even with
+        ``get(preserve=True)``.
+
     .. py:method:: get(blocking=False, timeout=None, backoff=1.15, max_delay=1.0, revoke_on_timeout=False, preserve=False)
 
         :param bool blocking: whether to block while waiting for task result
@@ -2280,7 +2303,7 @@ Storage
 
 Huey comes with several built-in storage implementations:
 
-.. py:class:: RedisStorage(name='huey', blocking=True, read_timeout=1, connection_pool=None, url=None, client_name=None, notify_result=False, notify_result_ttl=86400, **connection_params)
+.. py:class:: RedisStorage(name='huey', blocking=True, read_timeout=1, connection_pool=None, url=None, client_name=None, notify_result=False, notify_result_ttl=60, **connection_params)
 
     :param str name: namespace for storage.
     :param bool blocking: Use blocking-pop when reading from the queue (as
@@ -2300,7 +2323,7 @@ Huey comes with several built-in storage implementations:
     for the complete list of arguments supported by the Redis client.
 
 
-.. py:class:: RedisExpireStorage(name='huey', expire_time=86400, blocking=True, read_timeout=1, connection_pool=None, url=None, client_name=None, notify_result=False, notify_result_ttl=86400, **connection_params)
+.. py:class:: RedisExpireStorage(name='huey', expire_time=86400, blocking=True, read_timeout=1, connection_pool=None, url=None, client_name=None, notify_result=False, notify_result_ttl=60, **connection_params)
 
     :param int expire_time: TTL for results of individual tasks.
 
@@ -2313,7 +2336,7 @@ Huey comes with several built-in storage implementations:
     clean-up.
 
 
-.. py:class:: PriorityRedisStorage(name='huey', blocking=True, read_timeout=1, connection_pool=None, url=None, client_name=None, notify_result=False, notify_result_ttl=86400, **connection_params)
+.. py:class:: PriorityRedisStorage(name='huey', blocking=True, read_timeout=1, connection_pool=None, url=None, client_name=None, notify_result=False, notify_result_ttl=60, **connection_params)
 
     :param str name: namespace for storage.
     :param bool blocking: Use blocking-zpopmin when reading from the queue (as

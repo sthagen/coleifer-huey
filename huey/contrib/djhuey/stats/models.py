@@ -1,6 +1,9 @@
 from django.db import models
 
 
+# Nothing here is ever queried. The stats tables are owned, written and read
+# by peewee, and both admin pages render from it. These exist only to give the
+# admin a model to hang its index entry and URLs on.
 class HueyEvent(models.Model):
     ts = models.FloatField(db_index=True)
     queue = models.CharField(max_length=255, db_index=True)

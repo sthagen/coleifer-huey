@@ -144,6 +144,18 @@ their default values.
     option requires that the worker health check be enabled. If it is not, an
     error will be raised.
 
+``-t``, ``--shutdown-timeout``
+    Seconds to wait for workers to finish their current task during a graceful
+    shutdown. When the timeout elapses, remaining tasks are interrupted as if
+    the consumer had received the interrupt signal. By default the consumer
+    waits indefinitely for in-flight tasks to finish.
+
+``-g``, ``--graceful-signal``
+    By default huey uses ``INT`` to trigger graceful shutdown, and ``TERM`` to
+    interrupt running tasks and shutdown immediately. If your process
+    supervisor does not send ``SIGINT``, specify ``-g TERM``, which will use
+    ``TERM`` for graceful and ``INT`` to shutdown immediately.
+
 ``-s``, ``--scheduler-interval``
     The frequency with which the scheduler should run. By default this will run
     every second, but you can increase the interval to as much as 60 seconds.
@@ -268,6 +280,11 @@ they are currently executing before the process exits.
 Alternatively, you can shutdown the consumer using ``SIGTERM`` and any running
 tasks will be interrupted, ensuring the process exits quickly.
 
+To swap the two signals, so ``SIGTERM`` is graceful and ``SIGINT`` interrupts,
+run the consumer with ``--graceful-signal=TERM``. To put an upper bound on a
+graceful shutdown, use ``--shutdown-timeout``. Once the timeout elapses, any
+tasks still running are interrupted.
+
 Huey does not guarantee at-least-once delivery of messages, and does not do
 acknowledgement of completed tasks. This means that if you terminate the
 consumer **without** letting it finish any currently-executing tasks, those
@@ -318,7 +335,8 @@ configurations) and a production checklist, see :ref:`deployment`.
     Both supervisord and systemd stop processes with ``SIGTERM`` by default,
     which huey treats as "stop immediately, interrupting any running tasks".
     Huey's graceful-shutdown signal is ``SIGINT``, so be sure to configure
-    the stop signal as shown below. Otherwise tasks will be interrupted on
+    the stop signal as shown below, or run the consumer with
+    ``--graceful-signal=TERM``. Otherwise tasks will be interrupted on
     every deploy, regardless of how long the supervisor is told to wait.
 
 Barebones supervisor config using 4 worker threads:
@@ -454,6 +472,7 @@ be run. If so, these tasks are enqueued.
 
     When the consumer is shutdown using SIGTERM, any workers still
     involved in the execution of a task will be interrupted mid-task.
+    See ``--graceful-signal`` to swap the two.
 
 Signals
 -------

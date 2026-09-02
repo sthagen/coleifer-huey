@@ -265,7 +265,8 @@ Using SIGNAL_INTERRUPTED
 The correct way to shut-down the Huey consumer is to send a ``SIGINT`` signal
 to the worker process (e.g. Ctrl+C), which initiates a graceful shutdown.
 Sometimes, however, you may need to shut the consumer down using ``SIGTERM``,
-which stops it immediately. Any tasks that are currently being
+which stops it immediately (unless the consumer runs with
+``--graceful-signal=TERM``). Any tasks that are currently being
 executed are then "lost" and will not be retried by default (see also:
 :ref:`consumer-shutdown`).
 

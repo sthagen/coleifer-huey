@@ -949,6 +949,11 @@ If a second invocation occurs and the lock cannot be acquired, then a special
 :py:class:`TaskLockedException` is raised and the task will not be executed.
 If the task is configured to be retried, then it will be retried normally.
 
+Pass ``ttl`` (seconds) so a lock left behind by a killed worker expires on its
+own. The memory and redis storages support it, others raise
+``NotImplementedError``. With :py:class:`RedisHuey` the server must support
+hash-field TTL (redis 7.4+ or valkey 9+).
+
 Examples:
 
 .. code-block:: python
@@ -1205,6 +1210,11 @@ success pipeline (``parse_response``, ``store_result``) is skipped. If
 ``download`` succeeds, ``parse_response`` runs and ``on_download_error`` is
 never called.
 
+When a stage fails with no retries remaining, its error is also written as the
+result of every skipped downstream stage, so their :py:class:`Result` handles
+raise :py:class:`TaskException` instead of blocking. The exception metadata
+names the stage that failed in ``task_id``.
+
 .. note::
     The error handler is attached to the first task in the pipeline. If a
     *later* task in the pipeline fails (e.g., ``parse_response``), the error
@@ -1321,7 +1331,7 @@ What happens when a :py:class:`chord` is enqueued?
 1. All sub-tasks are placed on the queue. Workers begin executing them as they
    are dequeued.
 2. As each sub-task completes (or fails permanently), its return value (or
-   exception) is stored and an internal completion counter is atomically
+   error) is stored and an internal completion counter is atomically
    incremented.
 3. When the last sub-task is complete, all sub-task results are collected in
    order. The final callback is then enqueued with the sub-task results.
@@ -1330,9 +1340,10 @@ What happens when a :py:class:`chord` is enqueued?
 .. note::
     A sub-task that is skipped without executing (because it was revoked,
     expired, or cancelled by a pre-execute hook) still counts towards chord
-    completion and contributes ``None`` as its result. A sub-task that is
-    interrupted by an abrupt consumer shutdown, however, is lost (tasks are
-    delivered at-most-once), in which case the callback will not fire.
+    completion and contributes ``huey.SKIPPED`` as its result. A sub-task
+    that is interrupted by an abrupt consumer shutdown, however, is lost
+    (tasks are delivered at-most-once), in which case the callback will not
+    fire.
 
 Enqueueing a :py:class:`chord` returns a :py:class:`ChordResult`, which
 provides access to the final callback result, the sub-task results, and any
@@ -1464,24 +1475,30 @@ tasks complete, their results are collected and passed to ``publish``.
 Error handling in chords
 ^^^^^^^^^^^^^^^^^^^^^^^^
 
-chords are designed to **always complete**. When a sub-task fails and has no
-retries remaining, the exception is sent to the results list in place of a
-normal return value. The callback fires once all sub-tasks have completed, and
-in the event an error occurred, that sub-tasks' value is the exception.
+chords are designed to **always complete**. Each entry in the results list
+passed to the callback is one of:
 
-This means the callback may receive a mix of normal values and exceptions:
+* the sub-task's return value.
+* :py:class:`huey.utils.Error` if the sub-task failed with no retries
+  remaining. Its ``metadata`` dict holds the ``error`` repr, ``traceback``,
+  ``retries`` and ``task_id``.
+* ``huey.SKIPPED`` if the sub-task never ran (revoked, expired, or cancelled
+  by a pre-execute hook).
 
 .. code-block:: python
 
+    from huey import Error, SKIPPED
+
     @huey.task()
     def aggregate(results):
-        if any(isinstance(r, Exception) for r in results):
+        if any(isinstance(r, Error) for r in results):
             logger.warning('One of the sub-tasks failed.')
-        return process([r for r in results if not isinstance(r, Exception)])
+        return process([r for r in results
+                        if r is not SKIPPED and not isinstance(r, Error)])
 
 If a sub-task fails but has retries remaining, it will retry normally. The
-chord will not receive an Exception unless the sub-task has exhausted available
-retries.
+chord will not receive an :py:class:`~huey.utils.Error` unless the sub-task
+has exhausted available retries.
 
 .. code-block:: python
 
@@ -1541,9 +1558,9 @@ In this example, ``alert_admin`` runs if ``aggregate`` raises an exception,
 
 .. note::
     Revoking a chord member will prevent it from running, but the chord will
-    still complete: the revoked member contributes ``None`` to the results
-    and the callback fires normally. If you need to cancel a chord, revoke
-    the callback task instead.
+    still complete: the revoked member contributes ``huey.SKIPPED`` to the
+    results and the callback fires normally. If you need to cancel a chord,
+    revoke the callback task instead.
 
 .. note::
     Unlike regular tasks, chord sub-task results are stored unconditionally
@@ -1728,7 +1745,7 @@ weaknesses of each storage layer.
     For low-latency result-fetching, you can specify ``notify_result=True``
     when instantiating ``RedisHuey``. This works by coordinating result
     readiness through a blocking pop on a dedicated result list. By default
-    this result-readiness list will expire after 86400 seconds, but this can be
+    this result-readiness list will expire after 60 seconds, but this can be
     controlled with the ``notify_result_ttl`` parameter. **All RedisHuey**
     implementations support these options.
 

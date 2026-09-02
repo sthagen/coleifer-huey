@@ -21,6 +21,7 @@ SQLHUEY_URL = os.environ.get('SQLHUEY_URL') or 'sqlite:////tmp/huey-sqlite.db'
 @unittest.skipIf(peewee is None, 'requires peewee')
 class TestSqlStorage(StorageTests, BaseTestCase):
     db_file = '/tmp/huey-sqlite.db'
+    supports_ttl = False
 
     def setUp(self):
         if os.path.exists(self.db_file):

@@ -13,9 +13,10 @@ To simplify this, Huey provides two helpers for ``await``-ing task
 results. For a complete example of wiring Huey into an async web application,
 see :ref:`recipe-fastapi`.
 
-.. py:function:: aget_result(result, backoff=1.15, max_delay=1.0, preserve=False)
+.. py:function:: aget_result(result, backoff=1.15, max_delay=1.0, preserve=False, timeout=None)
 
     :param Result result: a result handle returned when calling a task.
+    :param timeout: seconds to wait before raising :py:class:`ResultTimeout`.
     :return: task return value.
 
     AsyncIO helper for awaiting the result of a task execution.
@@ -43,6 +44,12 @@ see :ref:`recipe-fastapi`.
                 aget_result(r1),
                 aget_result(r2),
                 aget_result(r3))
+
+            # Give up after 5 seconds.
+            try:
+                result = await aget_result(sleep(10), timeout=5)
+            except ResultTimeout:
+                ...
 
 
 .. py:function:: aget_result_group(rg, *args, **kwargs)

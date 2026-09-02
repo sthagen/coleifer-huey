@@ -22,6 +22,8 @@ config_defaults = (
     ('flush_locks', False),
     ('extra_locks', None),
     ('max_tasks', None),
+    ('shutdown_timeout', None),
+    ('graceful_signal', 'INT'),
 )
 config_keys = [param for param, _ in config_defaults]
 
@@ -39,7 +41,7 @@ def option(name, **options):
 class OptionParserHandler(object):
     def get_worker_options(self):
         return (
-            # -w, -k, -d, -m, -b, -c, -C, -f, -M
+            # -w, -k, -d, -m, -b, -c, -C, -f, -L, -M, -t, -g
             option('workers', type='int',
                    help='number of worker threads/processes (default=1)'),
             option(('k', 'worker-type'), choices=WORKER_TYPES,
@@ -73,6 +75,16 @@ class OptionParserHandler(object):
             option(('M', 'max-tasks'), dest='max_tasks', metavar='COUNT',
                    help='restart worker after it has executed COUNT tasks',
                    type='int'),
+            option(('t', 'shutdown-timeout'), dest='shutdown_timeout',
+                   metavar='SECONDS', type='float',
+                   help=('seconds to wait for workers to finish on graceful '
+                         'shutdown before interrupting them (default=wait '
+                         'forever)')),
+            option(('g', 'graceful-signal'), dest='graceful_signal',
+                   choices=('INT', 'TERM'),
+                   help=('signal that triggers graceful shutdown, INT or '
+                         'TERM (default=INT). The other signal interrupts '
+                         'running tasks.')),
         )
 
     def get_scheduler_options(self):
@@ -140,6 +152,8 @@ class ConsumerConfig(namedtuple('_ConsumerConfig', config_keys)):
         if 60 % self.scheduler_interval != 0:
             raise ValueError('The scheduler interval must be a factor of 60: '
                              '1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, or 60')
+        if self.graceful_signal not in ('INT', 'TERM'):
+            raise ValueError('The graceful signal must be INT or TERM.')
 
     @property
     def loglevel(self):

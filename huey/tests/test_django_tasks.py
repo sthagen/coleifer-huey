@@ -180,6 +180,18 @@ class TestDjangoTasksBackend(unittest.TestCase):
         finally:
             HUEY.storage.priority = True
 
+    def test_moved_function_marks_failed(self):
+        result = add.enqueue(1, 2)
+        saved = globals().pop('add')
+        try:
+            self.run_next()
+        finally:
+            globals()['add'] = saved
+
+        result.refresh()
+        self.assertEqual(result.status, TaskResultStatus.FAILED)
+        self.assertTrue(result.errors[0].exception_class is ImportError)
+
     def test_enqueue_on_commit(self):
         backend = {
             'BACKEND': 'huey.contrib.djhuey.tasks_backend.HueyBackend',

@@ -59,6 +59,7 @@
             <td class="text-end {{ 'text-danger' if s and s.errors else 'text-body-secondary' }}">{{ s.errors if s else 0 }}</td>
             <td class="text-end">{{ h.dur(s.avg) if s else '&mdash;'|safe }}</td>
             <td class="text-end">
+              {% if t.registered %}
               <form method="post" action="{{ url_for(panel.get_url_name('action')) }}" class="d-inline">
                 <input type="hidden" name="task" value="{{ t.full }}">
                 {% if t.revoked %}
@@ -69,10 +70,11 @@
                   <button class="btn btn-sm btn-outline-danger py-0">Revoke</button>
                 {% endif %}
               </form>
+              {% endif %}
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="6" class="text-body-secondary text-center py-3">No registered tasks.</td></tr>
+          <tr><td colspan="6" class="text-body-secondary text-center py-3">No tasks seen yet.</td></tr>
         {% endfor %}
         </tbody>
       </table>

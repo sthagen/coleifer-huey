@@ -144,21 +144,20 @@ def _record_to_result(rec):
 def _execute_django_task(task_path, args, kwargs, task=None):
     key = KEY % task.id
     rec = HUEY.get(key, peek=True)
-
-    func = _resolve_func(task_path)
-    takes_context = False
+    takes_context = rec['takes_context'] if rec is not None else False
 
     if rec is not None:
-        takes_context = rec['takes_context']
         now = _iso(timezone.now())
         rec['status'] = TaskResultStatus.RUNNING.value
         rec['started_at'] = rec['last_attempted_at'] = now
         rec['worker_ids'].append('%s.%s' % (socket.gethostname(), os.getpid()))
         HUEY.put_result(key, rec)
-        task_started.send(sender=HueyBackend,
-                          task_result=_record_to_result(rec))
 
     try:
+        func = _resolve_func(task_path)
+        if rec is not None:
+            task_started.send(sender=HueyBackend,
+                              task_result=_record_to_result(rec))
         if takes_context:
             ret = func(TaskContext(task_result=_record_to_result(rec)),
                        *args, **kwargs)
@@ -206,11 +205,6 @@ class HueyBackend(BaseTaskBackend):
         return bool(HUEY.storage.priority)
 
     def _check_resolvable(self, task):
-        # validate_task() accepts module-level lambdas and class-body
-        # functions, but their module paths cannot be imported by the
-        # consumer. Reject them before anything is stored or enqueued.
-        # This cannot live in validate_task(), which runs at decoration
-        # time, before the module being imported has bound the name.
         try:
             func = _resolve_func(task.module_path)
         except ImportError:

@@ -36,6 +36,15 @@ else:
 
 Error = namedtuple('Error', ('metadata',))
 
+
+class _Skipped(object):
+    def __repr__(self):
+        return 'SKIPPED'
+    def __reduce__(self):
+        return 'SKIPPED'
+
+SKIPPED = _Skipped()
+
 ChordConfig = namedtuple('ChordConfig', ('cid', 'size', 'idx', 'callback'))
 
 

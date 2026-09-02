@@ -17,6 +17,7 @@ from huey import signals as S
 from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
+from huey.exceptions import ConfigurationError
 from huey.exceptions import RateLimitExceeded
 from huey.exceptions import ResultTimeout
 from huey.exceptions import RetryTask
@@ -37,6 +38,7 @@ from huey.storage import RedisStorage
 from huey.storage import SqliteStorage
 from huey.utils import ChordConfig
 from huey.utils import Error
+from huey.utils import SKIPPED
 from huey.utils import noop_context
 from huey.utils import normalize_expire_time
 from huey.utils import normalize_time
@@ -276,7 +278,10 @@ class Huey(object):
 
     def notify_interrupted_tasks(self):
         while self._tasks_in_flight:
-            task = self._tasks_in_flight.pop()
+            try:
+                task = self._tasks_in_flight.pop()
+            except KeyError:
+                break  # Task might have raced and finished.
             self._emit(S.SIGNAL_INTERRUPTED, task)
 
     def signal(self, *signals):
@@ -289,10 +294,7 @@ class Huey(object):
         self._signal.disconnect(receiver, *signals)
 
     def _emit(self, signal, task, *args, **kwargs):
-        try:
-            self._signal.send(signal, task, *args, **kwargs)
-        except Exception:
-            logger.exception('Error occurred sending signal "%s"', signal)
+        self._signal.send(signal, task, *args, **kwargs)
 
     def serialize_task(self, task):
         message = self._registry.create_message(task)
@@ -390,8 +392,9 @@ class Huey(object):
         return self.storage.put_data(key, self.serializer.serialize(data),
                                      is_result=True)
 
-    def put_if_empty(self, key, data):
-        return self.storage.put_if_empty(key, self.serializer.serialize(data))
+    def put_if_empty(self, key, data, ttl=None):
+        return self.storage.put_if_empty(key, self.serializer.serialize(data),
+                                         ttl)
 
     def get_raw(self, key, peek=False):
         if peek:
@@ -427,11 +430,11 @@ class Huey(object):
         elif self.is_revoked(task, timestamp, False):
             logger.warning('Task %s was revoked, not executing', task)
             self._emit(S.SIGNAL_REVOKED, task)
-            self._abort_chord_member(task, None)
+            self._abort_chord_member(task, SKIPPED)
         elif task.expires_resolved and task.expires_resolved < timestamp:
             logger.info('Task %s expired, not executing.', task)
             self._emit(S.SIGNAL_EXPIRED, task)
-            self._abort_chord_member(task, None)
+            self._abort_chord_member(task, SKIPPED)
         else:
             logger.info('Executing %s', task)
             self._emit(S.SIGNAL_EXECUTING, task)
@@ -443,7 +446,7 @@ class Huey(object):
                 self._run_pre_execute(task)
             except CancelExecution:
                 self._emit(S.SIGNAL_CANCELED, task)
-                self._abort_chord_member(task, None)
+                self._abort_chord_member(task, SKIPPED)
                 return
 
         start = time.monotonic()
@@ -461,7 +464,9 @@ class Huey(object):
                 with self._timeout_context(task):
                     task_value = task.execute()
             finally:
-                self._tasks_in_flight.remove(task)
+                # discard(), as notify_interrupted_tasks() in the main thread
+                # may have popped the task during a non-graceful shutdown.
+                self._tasks_in_flight.discard(task)
                 duration = time.monotonic() - start
         except TaskTimeout as exc:
             logger.warning('Task %s timed out after %ss.', task.id,
@@ -524,6 +529,10 @@ class Huey(object):
             if surface_error:
                 error_data = self.build_error_result(task, exception)
                 self.put_result(task.id, Error(error_data))
+                next_task = task.on_complete if not task.retries else None
+                while next_task is not None:
+                    self.put_result(next_task.id, Error(error_data))
+                    next_task = next_task.on_complete
             elif exception is None and (task_value is not None or
                                         self.store_none):
                 self.put_result(task.id, task_value)
@@ -552,7 +561,8 @@ class Huey(object):
             if task.chord_config is not None:
                 self._check_chord(task.chord_config, task_value)
         elif not task.retries:
-            self._abort_chord_member(task, exception)
+            error = Error(self.build_error_result(task, exception))
+            self._abort_chord_member(task, error)
 
         if exception is not None and task.retries:
             self._emit(S.SIGNAL_RETRYING, task)
@@ -577,11 +587,13 @@ class Huey(object):
         if self.storage.incr(chord_key) == cc.size:
             self.storage.delete_counter(chord_key)
 
-            # Destructively read raw results w/o raising errors for exceptions.
+            # Read raw results w/o raising for errors, then delete explicitly
+            # as expiring storages implement pop_data as a peek.
             results = []
             for idx in range(cc.size):
-                result = self.get('chord:%s:%s' % (cc.cid, idx))
-                results.append(result)
+                key = 'chord:%s:%s' % (cc.cid, idx)
+                results.append(self.get(key, peek=True))
+                self.delete(key)
 
             callback = cc.callback
             callback.extend_data((results,))
@@ -671,18 +683,17 @@ class Huey(object):
     def restore_by_id(self, id):
         return self.restore(Task(id=id))
 
-    def _check_revoked(self, revoke_id, timestamp=None, peek=True):
+    def _check_revoked(self, data, timestamp=None, peek=True):
         """
-        Checks if a task is revoked, returns a 2-tuple indicating:
+        Given raw revocation data, returns a 2-tuple indicating:
 
         1. Is task revoked?
         2. Should task be restored?
         """
-        res = self.get(revoke_id, peek=True)
-        if res is None:
+        if data is EmptyData:
             return False, False
 
-        revoke_until, revoke_once = res
+        revoke_until, revoke_once = self.serializer.deserialize(data)
         if revoke_until is not None and timestamp is None:
             timestamp = self._get_timestamp()
 
@@ -701,24 +712,30 @@ class Huey(object):
         if isinstance(task, TaskWrapper):
             task = task.task_class
         if inspect.isclass(task) and issubclass(task, Task):
-            key = self._task_key(task, 'rt')
-            is_revoked, can_restore = self._check_revoked(key, timestamp, peek)
+            data = self.storage.peek_data(self._task_key(task, 'rt'))
+            is_revoked, can_restore = self._check_revoked(data, timestamp, peek)
             if can_restore:
                 self.restore_all(task)
             return is_revoked
 
         if isinstance(task, Result):
             task = task.task
-        elif not isinstance(task, Task):
-            # Assume we've been given a task ID.
+        by_id = not isinstance(task, Task)
+        if by_id:
             task = Task(id=task)
 
-        key = task.revoke_id
-        is_revoked, can_restore = self._check_revoked(key, timestamp, peek)
+        rt_key = self._task_key(type(task), 'rt')
+        keys = [task.revoke_id] if by_id else [task.revoke_id, rt_key]
+        data = self.storage.peek_many(keys)
+        is_revoked, can_restore = self._check_revoked(
+            data.get(task.revoke_id, EmptyData), timestamp, peek)
         if can_restore:
             self.restore(task)
-        if not is_revoked:
-            is_revoked = self.is_revoked(type(task), timestamp, peek)
+        if not is_revoked and not by_id:
+            is_revoked, can_restore = self._check_revoked(
+                data.get(rt_key, EmptyData), timestamp, peek)
+            if can_restore:
+                self.restore_all(type(task))
 
         return is_revoked
 
@@ -732,14 +749,15 @@ class Huey(object):
     def read_schedule(self, timestamp=None):
         if timestamp is None:
             timestamp = self._get_timestamp()
+        return self._deserialize_all(self.storage.read_schedule(timestamp))
+
+    def _deserialize_all(self, messages):
         accum = []
-        for msg in self.storage.read_schedule(timestamp):
+        for msg in messages:
             try:
-                task = self.deserialize_task(msg)
+                accum.append(self.deserialize_task(msg))
             except Exception:
-                logger.exception('Unable to deserialize scheduled task.')
-            else:
-                accum.append(task)
+                logger.exception('Unable to deserialize task.')
         return accum
 
     def read_periodic(self, timestamp):
@@ -754,15 +772,13 @@ class Huey(object):
         return task.eta is None or task.eta <= timestamp
 
     def pending(self, limit=None):
-        return [self.deserialize_task(task)
-                for task in self.storage.enqueued_items(limit)]
+        return self._deserialize_all(self.storage.enqueued_items(limit))
 
     def pending_count(self):
         return self.storage.queue_size()
 
     def scheduled(self, limit=None):
-        return [self.deserialize_task(task)
-                for task in self.storage.scheduled_items(limit)]
+        return self._deserialize_all(self.storage.scheduled_items(limit))
 
     def scheduled_count(self):
         return self.storage.schedule_size()
@@ -782,8 +798,8 @@ class Huey(object):
     def flush(self):
         self.storage.flush_all()
 
-    def lock_task(self, lock_name):
-        return TaskLock(self, lock_name)
+    def lock_task(self, lock_name, ttl=None):
+        return TaskLock(self, lock_name, ttl)
 
     def is_locked(self, lock_name):
         return TaskLock(self, lock_name).is_locked()
@@ -966,13 +982,11 @@ class PeriodicTask(Task):
 class TaskWrapper(object):
     task_base = Task
 
-    def __init__(self, huey, func, retries=None, retry_delay=None,
-                 context=False, name=None, task_base=None, **settings):
+    def __init__(self, huey, func, context=False, name=None, task_base=None,
+                 **settings):
         self.__doc__ = getattr(func, '__doc__', None)
         self.huey = huey
         self.func = func
-        self.retries = retries
-        self.retry_delay = retry_delay
         self.context = context
         self.name = name
         self.settings = settings
@@ -983,10 +997,23 @@ class TaskWrapper(object):
         self.task_class = self.create_task(func, context, name, **settings)
         self.huey._registry.register(self.task_class)
 
+    @property
+    def retries(self):
+        return self.task_class.default_retries
+
+    @property
+    def retry_delay(self):
+        return self.task_class.default_retry_delay
+
     def unregister(self):
         return self.huey._registry.unregister(self.task_class)
 
     def create_task(self, func, context=False, name=None, **settings):
+        if inspect.iscoroutinefunction(func):
+            raise ConfigurationError(
+                'huey does not support async functions. Wrap the coroutine '
+                'with asyncio.run() in a regular function.')
+
         def execute(self):
             args, kwargs = self.data
             if self.context:
@@ -1052,7 +1079,9 @@ class TaskWrapper(object):
         return [self.s(*(i if isinstance(i, tuple) else (i,))) for i in it]
 
     def map(self, it):
-        return ResultGroup([self.huey.enqueue(t) for t in self._apply(it)])
+        results = [self.huey.enqueue(t) for t in self._apply(it)]
+        if self.huey.results:
+            return ResultGroup(results)
 
     def __call__(self, *args, **kwargs):
         return self.huey.enqueue(self.s(*args, **kwargs))
@@ -1069,6 +1098,7 @@ class TaskWrapper(object):
             eta = normalize_time(eta, delay, self.huey.utc)
 
         return self.task_class(args, kwargs,
+                               id=kwargs.pop('id', None),
                                eta=eta,
                                retries=kwargs.pop('retries', None),
                                retry_delay=kwargs.pop('retry_delay', None),
@@ -1083,9 +1113,10 @@ class TaskLock(object):
     Utilize the Storage key/value APIs to implement simple locking. For more
     details see :py:meth:`Huey.lock_task`.
     """
-    def __init__(self, huey, name):
+    def __init__(self, huey, name, ttl=None):
         self._huey = huey
         self._name = name
+        self._ttl = ttl
         self._key = '%s.lock.%s' % (self._huey.name, self._name)
         self._huey._locks.add(self._key)
 
@@ -1108,7 +1139,7 @@ class TaskLock(object):
         self._huey.delete(self._key)
 
     def acquire(self):
-        if not self._huey.put_if_empty(self._key, '1'):
+        if not self._huey.put_if_empty(self._key, '1', self._ttl):
             raise TaskLockedException('unable to acquire lock %s' % self._name)
         return True
 
@@ -1374,7 +1405,7 @@ class ChordResult(object):
         self.callback.reset()
 
 
-dash_re = re.compile(r'(\d+)-(\d+)')
+dash_re = re.compile(r'(\d+)-(\d+)(?:/(\d+))?')
 every_re = re.compile(r'\*\/(\d+)')
 
 
@@ -1425,15 +1456,22 @@ def crontab(minute='*', hour='*', day='*', month='*', day_of_week='*', strict=Fa
                 settings.add(piece)
                 continue
 
-            dash_match = dash_re.match(piece)
+            dash_match = dash_re.fullmatch(piece)
             if dash_match:
-                lhs, rhs = map(int, dash_match.groups())
+                lhs, rhs, step = dash_match.groups()
+                lhs, rhs, step = int(lhs), int(rhs), int(step or 1)
                 if lhs not in acceptable or rhs not in acceptable:
                     raise ValueError('%s is not a valid input' % piece)
                 elif date_str == 'w':
                     lhs %= 7
                     rhs %= 7
-                settings.update(range(lhs, rhs + 1))
+                if lhs <= rhs:
+                    values = list(range(lhs, rhs + 1))
+                else:
+                    hi = 6 if date_str == 'w' else acceptable[-1]
+                    values = (list(range(lhs, hi + 1)) +
+                              list(range(acceptable[0], rhs + 1)))
+                settings.update(values[::step])
                 continue
 
             # Handle stuff like */3, */6.
@@ -1450,6 +1488,8 @@ def crontab(minute='*', hour='*', day='*', month='*', day_of_week='*', strict=Fa
             if strict:
                 raise ValueError('%s is not a valid input' % piece)
 
+        if not settings:
+            raise ValueError('%s matches no values' % value)
         cron_settings.append(sorted(list(settings)))
 
     def validate_date(timestamp):

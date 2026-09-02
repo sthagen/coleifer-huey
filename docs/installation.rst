@@ -24,10 +24,14 @@ library, which is most easily installed using the matching extra:
     # cysqlite, to use CySqliteHuey instead of SqliteHuey.
     pip install huey[cysqlite]
 
+    # peewee, for the task statistics recorder and admin dashboards.
+    pip install huey[stats]
+
 These pull in `redis-py <https://github.com/redis/redis-py>`_,
-`psycopg <https://www.psycopg.org/>`_ and
-`cysqlite <https://cysqlite.readthedocs.io/>`_ respectively, and may equally
-be installed by name.
+`psycopg <https://www.psycopg.org/>`_,
+`cysqlite <https://cysqlite.readthedocs.io/>`_ and
+`peewee <https://docs.peewee-orm.com/>`_ respectively, and may equally be
+installed by name.
 
 If your tasks are IO-bound rather than CPU-bound, you might consider using the
 ``greenlet`` worker type. To use the greenlet workers, you need to

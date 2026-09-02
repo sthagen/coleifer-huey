@@ -180,8 +180,8 @@ def on_commit_task(*args, **kwargs):
             # Do some database operation.
             pass
 
-        my_task = task()(update_data)
-        my_on_commit_task = on_commit_task()(update_data)
+        my_task = task(name='update_data')(update_data)
+        my_on_commit_task = on_commit_task(name='update_data_oc')(update_data)
     """
     def decorator(fn):
         task_wrapper = task(*args, **kwargs)(close_db(fn))

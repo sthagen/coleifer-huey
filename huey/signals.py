@@ -1,5 +1,8 @@
 import itertools
+import logging
 
+
+logger = logging.getLogger('huey')
 
 SIGNAL_CANCELED = 'canceled'
 SIGNAL_COMPLETE = 'complete'
@@ -42,4 +45,9 @@ class Signal(object):
         receivers = itertools.chain(self.receivers.get(signal, ()),
                                     self.receivers['any'])
         for receiver in receivers:
-            receiver(signal, task, *args, **kwargs)
+            try:
+                receiver(signal, task, *args, **kwargs)
+            except Exception:
+                logger.exception('Error occurred in receiver "%s" for signal '
+                                 '"%s"', getattr(receiver, '__name__',
+                                                 repr(receiver)), signal)

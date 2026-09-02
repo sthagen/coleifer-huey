@@ -1,6 +1,7 @@
-import time
+from urllib.parse import urlencode
 
 from django.contrib import admin
+from django.contrib.auth import get_permission_codename
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponseRedirect
 from django.template.response import TemplateResponse
@@ -8,8 +9,6 @@ from django.urls import path
 from django.urls import reverse
 
 from huey.contrib.djhuey.stats.models import HueyDashboard
-from huey.contrib.djhuey.stats.models import HueyEvent
-from huey.contrib.djhuey.stats.templatetags.hueystats import fmt_duration
 
 
 def get_huey():
@@ -17,39 +16,11 @@ def get_huey():
     return HUEY
 
 
-@admin.register(HueyEvent)
-class HueyEventAdmin(admin.ModelAdmin):
-    list_display = ('event_time', 'queue', 'task', 'signal',
-                    'event_duration', 'error')
-    list_filter = ('signal', 'queue', 'task')
-    search_fields = ('task_id', 'task', 'error')
-    ordering = ('-id',)
-    list_per_page = 100
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
-
-    def has_delete_permission(self, request, obj=None):
-        return False
-
-    def event_time(self, obj):
-        return time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(obj.ts))
-    event_time.short_description = 'time'
-    event_time.admin_order_field = 'ts'
-
-    def event_duration(self, obj):
-        return fmt_duration(obj.duration)
-    event_duration.short_description = 'duration'
-    event_duration.admin_order_field = 'duration'
-
-
 @admin.register(HueyDashboard)
 class HueyDashboardAdmin(admin.ModelAdmin):
     list_limit = 50
     event_limit = 50
+    event_page_size = 100
     throughput_minutes = 60
 
     def has_add_permission(self, request):
@@ -61,6 +32,10 @@ class HueyDashboardAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return False
 
+    def has_action_permission(self, request):
+        codename = get_permission_codename('change', self.opts)
+        return request.user.has_perm('%s.%s' % (self.opts.app_label, codename))
+
     def get_urls(self):
         wrap = self.admin_site.admin_view
         return [
@@ -68,6 +43,8 @@ class HueyDashboardAdmin(admin.ModelAdmin):
                  name='hueystats_dashboard_fragment'),
             path('action/', wrap(self.action_view),
                  name='hueystats_dashboard_action'),
+            path('events/', wrap(self.events_view),
+                 name='hueystats_dashboard_events'),
         ] + super().get_urls()
 
     def _context(self, request):
@@ -75,11 +52,14 @@ class HueyDashboardAdmin(admin.ModelAdmin):
         from huey.contrib.stats import live_counts
         huey = get_huey()
         stats = getattr(huey, '_stats', None)
+        can_act = self.has_action_permission(request)
         if stats is None:
-            return {'enabled': False, 'live': live_counts(huey)}
+            return {'enabled': False, 'live': live_counts(huey),
+                    'can_act': can_act}
         context = dashboard_context(huey, stats, self.list_limit,
                                     self.event_limit, self.throughput_minutes)
         context['enabled'] = True
+        context['can_act'] = can_act
         for row in context['known']:
             if row['stats'] is None:
                 row['stats'] = {'executed': 0, 'completed': 0, 'errors': 0,
@@ -116,8 +96,38 @@ class HueyDashboardAdmin(admin.ModelAdmin):
         return TemplateResponse(request, 'admin/hueystats/_content.html',
                                 self._context(request))
 
+    def events_view(self, request):
+        if not self.has_view_permission(request):
+            raise PermissionDenied
+        stats = getattr(get_huey(), '_stats', None)
+        context = {**self.admin_site.each_context(request),
+                   'title': 'Huey events', 'enabled': stats is not None}
+        if stats is not None:
+            signal = request.GET.get('signal') or ''
+            task = request.GET.get('task') or ''
+            q = request.GET.get('q') or ''
+            try:
+                page = max(0, int(request.GET.get('p', 0)))
+            except (TypeError, ValueError):
+                page = 0
+            n = self.event_page_size
+            total, events = stats.search_events(
+                signal=signal or None, task=task or None, q=q or None,
+                limit=n, offset=page * n)
+            qs = urlencode([(k, v) for k, v in (
+                ('signal', signal), ('task', task), ('q', q)) if v])
+            context.update(
+                events=events, total=total, page=page, signal=signal,
+                task=task, q=q, signals=stats.event_signals(),
+                tasks=stats.event_tasks(), qs=qs + '&' if qs else '',
+                prev_page=page - 1, next_page=page + 1,
+                has_next=(page + 1) * n < total,
+                start=page * n + 1, end=min(total, page * n + len(events)))
+        return TemplateResponse(request, 'admin/hueystats/events.html',
+                                context)
+
     def action_view(self, request):
-        if not self.has_view_permission(request) or request.method != 'POST':
+        if not self.has_action_permission(request) or request.method != 'POST':
             raise PermissionDenied
         huey = get_huey()
         op = request.POST.get('op')

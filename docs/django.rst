@@ -421,16 +421,33 @@ That is the whole setup. The app starts the stats recorder in every process
 at start-up, including the consumer (``run_huey`` is a management command),
 so both enqueue and execution events are captured with no further
 configuration. The recorder uses `peewee <https://docs.peewee-orm.com/>`_ for
-storage, creating its tables automatically in ``DATABASES['default']`` (there
-are no migrations to run) and pruning old rows as new events are written.
+storage (``pip install huey[stats]``), creating its tables automatically
+and pruning old rows as new events are written.
 
-The admin index gets a *Huey* section with two entries:
+Stats are recorded to huey's own sqlite database, ``huey-stats.db``, written
+next to ``settings.BASE_DIR`` if you have defined one. Huey does not touch
+``DATABASES``.
+
+The recorder starts in every process that loads your settings, so the file is
+created by the first management command you run and each process holds a
+connection to it. If you point ``HUEY_STATS['database']`` at a server-based
+database, pass ``create_tables=False`` and create the two tables yourself
+rather than have every web worker issue DDL at start-up.
+
+The admin index gets a *Huey* section:
 
 * **Dashboard**: live queue depths, a throughput chart, per-task statistics,
   currently-running tasks and recent events, refreshed every 5 seconds, with
   controls to revoke/restore tasks and flush the queue, schedule, results or
   locks.
-* **Events**: a filterable, searchable log of the raw signal events.
+* **Events**: a filterable, searchable log of the raw signal events, linked
+  from the dashboard's *Recent events* heading. Filter by signal or task,
+  search across task id, task name and error text, and page back through the
+  retained history.
+
+Staff users with the ``hueystats.view_hueydashboard`` permission can see both
+pages. The revoke, restore and flush controls require
+``hueystats.change_hueydashboard``.
 
 Options may be provided via a ``HUEY_STATS`` setting:
 
@@ -441,28 +458,68 @@ Options may be provided via a ``HUEY_STATS`` setting:
         'max_events': 2000,      # Cap on rows retained per queue.
         'capture_args': False,   # Store a truncated repr of task arguments.
 
-        # Stats are stored in DATABASES['default'] by default. Override with
-        # a peewee Database instance or db-url string:
-        #'database': 'sqlite:///huey-stats.db',
+        # Path to the sqlite database. Relative paths are resolved against
+        # settings.BASE_DIR.
+        #'filename': 'huey-stats.db',
+
+        # Or store stats somewhere else entirely: a peewee Database instance
+        # or a db-url string.
+        #'database': 'postgresql://user:password@localhost/my_db',
+
     }
 
 .. note::
-    If ``HUEY_STATS['database']`` points somewhere other than the default
-    Django database, the dashboard works as usual but the *Events* changelist
-    (which reads through the Django ORM) will not find the tables.
+    Test runs record to the same file. If a stray ``huey-stats.db`` in your
+    project is a nuisance, point ``filename`` (or ``database``) somewhere
+    else in your test settings.
+
+.. _django-stats-own-database:
+
+Storing stats in your Django database
+"""""""""""""""""""""""""""""""""""""
+
+Set ``HUEY_STATS['database']`` to keep the two tables alongside your
+application data. The simplest form is a db-url:
+
+.. code-block:: python
+
+    HUEY_STATS = {'database': 'postgresql://user:password@localhost/my_db'}
+
+If you would rather not repeat the credentials, build a peewee database from
+the same settings Django uses:
+
+.. code-block:: python
+
+    # settings.py
+    import peewee
+
+    _db = DATABASES['default']
+    HUEY_STATS = {
+        'database': peewee.PostgresqlDatabase(
+            _db['NAME'],
+            user=_db['USER'],
+            password=_db['PASSWORD'],
+            host=_db['HOST'],
+            port=int(_db['PORT']) if _db['PORT'] else None,
+            sslmode=_db.get('OPTIONS', {}).get('sslmode'))}
+
+Pass whatever connection parameters your driver needs. ``PostgresqlDatabase``
+uses ``psycopg2`` if it is installed, and ``psycopg`` (3) otherwise. Pass
+``prefer_psycopg3=True`` to choose 3 when both are present.
+
+The stats recorder manages its own connection, separate from Django's. On
+Postgres or MySQL that is one extra connection per process.
 
 .. note::
     The dashboard's *Registered tasks* table lists the tasks known to the
     **web** process. ``run_huey`` autodiscovers each app's ``tasks`` module
     but the web server does not, so import your tasks from your app's
-    ``AppConfig.ready()`` to make them visible (see
-    ``examples/django_ex``).
-
+    ``AppConfig.ready()`` to make them visible (see ``examples/django_ex``).
 
 .. _django-task:
 
 Django task framework
----------------------
+^^^^^^^^^^^^^^^^^^^^^
 
 Django 6.0 includes `django.tasks
 <https://docs.djangoproject.com/en/stable/topics/tasks/>`_, a standard

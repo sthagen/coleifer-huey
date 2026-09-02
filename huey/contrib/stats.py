@@ -1,4 +1,5 @@
 import atexit
+import logging
 import os
 import threading
 import time
@@ -8,11 +9,16 @@ import peewee
 from huey import signals as S
 
 
+# Signals for when a task stops running. Task itself may still be retried, but
+# it will be re-enqueued in that case.
 TERMINAL = frozenset((
     S.SIGNAL_COMPLETE, S.SIGNAL_ERROR, S.SIGNAL_CANCELED, S.SIGNAL_INTERRUPTED,
-    S.SIGNAL_EXPIRED, S.SIGNAL_REVOKED))
+    S.SIGNAL_EXPIRED, S.SIGNAL_REVOKED, S.SIGNAL_TIMEOUT, S.SIGNAL_LOCKED,
+    S.SIGNAL_RATE_LIMITED, S.SIGNAL_RETRYING))
 
 database = peewee.DatabaseProxy()
+
+logger = logging.getLogger('huey.stats')
 
 
 class BaseModel(peewee.Model):
@@ -47,24 +53,28 @@ class HueyInflight(BaseModel):
 MODELS = (HueyEvent, HueyInflight)
 
 
+def _unwrap_proxy(obj):
+    return obj.obj if isinstance(obj, peewee.Proxy) else obj
+
 def _resolve_db(db):
-    if isinstance(db, peewee.Database):
-        return db
-    inner = getattr(db, 'database', None)  # flask_peewee.db.Database wrapper.
-    if isinstance(inner, peewee.Database):
-        return inner
+    obj = _unwrap_proxy(db)
+    if not isinstance(obj, peewee.Database):
+        obj = _unwrap_proxy(getattr(obj, 'database', None))
+    if isinstance(obj, peewee.Database):
+        return obj
     raise TypeError('Expected a peewee Database or flask_peewee Database, got '
                     '%r' % (db,))
 
 
 class HueyStats(object):
     def __init__(self, huey, db, retention_hours=48, max_events=2000,
-                 capture_args=False, create_tables=True, flush_interval=0.5,
-                 flush_max=200):
+                 inflight_hours=6, capture_args=False, create_tables=True,
+                 flush_interval=0.5, flush_max=200):
         self.huey = huey
         self.name = huey.name
         self.db = _resolve_db(db)
         self.retention = retention_hours * 3600
+        self.inflight_retention = inflight_hours * 3600
         self.max_events = max_events
         self.capture_args = capture_args
         self._flush_interval = flush_interval
@@ -139,15 +149,22 @@ class HueyStats(object):
                 'duration': duration,
                 'error': repr(exc)[:1000] if (signal == S.SIGNAL_ERROR and exc)
                     else None,
-                'args': ('%r %r' % (task.args, task.kwargs))[:400]
-                    if self.capture_args else None}
+                'args': self._format_args(task) if self.capture_args
+                    else None}
             with self._lock:
                 self._buf.append(row)
                 pending = len(self._buf)
             if pending >= self._flush_max:
                 self._wake.set()
         except Exception:
-            pass
+            logger.exception('stats event dropped.')
+
+    def _format_args(self, task):
+        # A task argument whose repr() raises must not cost us the event.
+        try:
+            return ('%r %r' % (task.args, task.kwargs))[:400]
+        except Exception:
+            return '<unrepresentable>'
 
     def _writer_loop(self):
         while not self._stop.is_set():
@@ -173,7 +190,8 @@ class HueyStats(object):
                 inflight[row['task_id']] = None
         try:
             with self.db.atomic():
-                HueyEvent.insert_many(batch).execute()
+                for chunk in peewee.chunked(batch, 100):
+                    HueyEvent.insert_many(chunk).execute()
                 for task_id in sorted(inflight):
                     row = inflight[task_id]
                     HueyInflight.delete().where(
@@ -183,6 +201,8 @@ class HueyStats(object):
                             task_id=task_id, queue=row['queue'],
                             task=row['task'], started=row['ts']).execute()
         except Exception:
+            logger.exception('stats flush failed, dropping %s events.',
+                             len(batch))
             return
         self._maybe_prune()
 
@@ -196,17 +216,20 @@ class HueyStats(object):
                 (HueyEvent.delete()
                  .where(HueyEvent.queue == self.name,
                         HueyEvent.ts < now - self.retention).execute())
-                mx = (HueyEvent.select(peewee.fn.MAX(HueyEvent.id))
-                      .where(HueyEvent.queue == self.name).scalar())
-                if mx:
+                cutoff = (HueyEvent.select(HueyEvent.id)
+                          .where(HueyEvent.queue == self.name)
+                          .order_by(HueyEvent.id.desc())
+                          .limit(1).offset(self.max_events).scalar())
+                if cutoff is not None:
                     (HueyEvent.delete()
                      .where(HueyEvent.queue == self.name,
-                            HueyEvent.id < mx - self.max_events).execute())
+                            HueyEvent.id <= cutoff).execute())
                 (HueyInflight.delete()
                  .where(HueyInflight.queue == self.name,
-                        HueyInflight.started < now - 21600).execute())
+                        HueyInflight.started < now - self.inflight_retention)
+                 .execute())
         except Exception:
-            pass
+            logger.exception('stats prune failed.')
         if len(self._start) > 10000:
             self._start.clear()
 
@@ -217,6 +240,10 @@ class HueyStats(object):
         self._wake.set()
         if self._writer is not None:
             self._writer.join(timeout=2)
+        # Rows appended while the writer was inside its last flush are still
+        # buffered: it re-checks the stop flag before flushing again, and
+        # exits. Drain them here rather than lose the tail of every process.
+        self._flush()
 
     def _events(self):
         return HueyEvent.select().where(HueyEvent.queue == self.name)
@@ -228,13 +255,50 @@ class HueyStats(object):
                 .group_by(HueyEvent.signal).tuples())
         return {signal: n for signal, n in rows}
 
+    def _format_event(self, row, fmt='%H:%M:%S'):
+        return {'ts': row['ts'],
+                'time': time.strftime(fmt, time.localtime(row['ts'])),
+                'task': row['task'].rsplit('.', 1)[-1],
+                'task_full': row['task'], 'task_id': row['task_id'],
+                'signal': row['signal'], 'duration': row['duration'],
+                'error': row['error'], 'args': row.get('args')}
+
     def recent_events(self, limit=50):
-        rows = (self._events().order_by(HueyEvent.id.desc()).limit(limit)
-                .dicts())
-        return [{'ts': r['ts'],
-                 'time': time.strftime('%H:%M:%S', time.localtime(r['ts'])),
-                 'task': r['task'].rsplit('.', 1)[-1], 'signal': r['signal'],
-                 'duration': r['duration'], 'error': r['error']} for r in rows]
+        rows = (self._events().order_by(HueyEvent.ts.desc(),
+                                        HueyEvent.id.desc())
+                .limit(limit).dicts())
+        return [self._format_event(r) for r in rows]
+
+    def search_events(self, signal=None, task=None, q=None, limit=100,
+                      offset=0):
+        """
+        Filtered slice of the event log, newest first. Returns the total
+        number of matching rows along with the requested page of them.
+        """
+        query = self._events()
+        if signal:
+            query = query.where(HueyEvent.signal == signal)
+        if task:
+            query = query.where(HueyEvent.task == task)
+        if q:
+            query = query.where(HueyEvent.task_id.contains(q) |
+                                HueyEvent.task.contains(q) |
+                                HueyEvent.error.contains(q))
+        total = query.count()
+        rows = (query.order_by(HueyEvent.ts.desc(), HueyEvent.id.desc())
+                .limit(limit).offset(offset).dicts())
+        return total, [self._format_event(r, '%Y-%m-%d %H:%M:%S')
+                       for r in rows]
+
+    def event_signals(self):
+        rows = (self._events().select(HueyEvent.signal).distinct()
+                .order_by(HueyEvent.signal).tuples())
+        return [signal for signal, in rows]
+
+    def event_tasks(self):
+        rows = (self._events().select(HueyEvent.task).distinct()
+                .order_by(HueyEvent.task).tuples())
+        return [task for task, in rows]
 
     def inflight(self):
         now = time.time()
@@ -342,6 +406,16 @@ def dashboard_context(huey, stats, list_limit=50, event_limit=50,
     known = known_tasks(huey)
     for row in known:
         row['stats'] = stats_map.get(row['full'])
+        row['registered'] = True
+    # A web process does not autodiscover tasks the way the consumer does, so
+    # without this the table lists whatever happens to be imported here and
+    # hides every task that actually ran.
+    seen = {row['full'] for row in known}
+    for full, row in sorted(stats_map.items()):
+        if full not in seen:
+            known.append({'full': full, 'task': full.rsplit('.', 1)[-1],
+                          'revoked': False, 'registered': False,
+                          'stats': row})
     return {'live': live_counts(huey), 'overview': stats.overview(),
             'known': known, 'inflight': stats.inflight(),
             'events': stats.recent_events(event_limit),

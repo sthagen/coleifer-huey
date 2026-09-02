@@ -3,6 +3,91 @@ Changelog
 
 ## master
 
+* **Backwards-incompatible.** The django stats app writes to its own sqlite
+  database by default (`huey-stats.db` in `settings.BASE_DIR`), instead of
+  `DATABASES['default']`. To keep recording in your main Django database,
+  specify the database explicitly:
+
+  ```python
+  HUEY_STATS = {'database': 'postgresql://user:password@localhost/my_db'}
+  ```
+
+  `HUEY_STATS['database']` takes a db-url or a peewee `Database`, or use
+  `HUEY_STATS['filename']` to set the sqlite path. See the Django docs section
+  for building a peewee database from your existing `DATABASES` entry.
+
+  The admin *Events* log is now rendered from the stats database through
+  peewee, rather than being a `ModelAdmin` via ORM. It is now linked from the
+  dashboard's *Recent events* heading.
+
+Consumer:
+
+* Add `--shutdown-timeout` option to bound graceful shutdown time.
+* Add `--graceful-signal` option to allow making SIGTERM the graceful shutdown
+  signal (e.g. ``-g TERM``).
+
+User-facing APIs:
+
+* Add `ttl` to `lock_task()` and `put_if_empty()` so locks expire on their own.
+  Supported by memory and redis storages, others raise `NotImplementedError`.
+  `RedisHuey` requires server hash-field TTL support (redis 7.4+ or valkey
+  9+), `RedisExpireHuey` works on any version.
+* Add `timeout` parameter to `aget_result()`.
+
+Small stuff:
+
+* Ensure one raising signal receiver does not prevent the remaining receivers
+  from running.
+* Fix crontab ranges with a step (`0-30/5`) and wrap-around ranges (`22-2`,
+  `day_of_week='1-7'`). Raise `ValueError` when a field matches no values.
+* Pass failed chord members to the callback as `huey.Error` and skipped
+  (revoked, expired, cancelled) members as `huey.SKIPPED` instead of a raw
+  exception or `None`.
+* Delete chord partial results explicitly on completion, so they no longer
+  linger until expiry on `RedisExpireStorage`.
+* Write the error of a failed pipeline stage to every skipped downstream
+  stage, so their `Result` handles raise instead of blocking.
+* Accept an explicit `id` in `TaskWrapper.s()`, matching `schedule()`.
+
+Storage:
+
+* Skip messages that fail to deserialize in `Huey.pending()` and
+  `Huey.scheduled()`, logging the error, as `read_schedule()` already does.
+* Add `clean_name` option to `RedisHuey` (default to `True`). Specify `False`
+  to stop stripping non-alphanumeric characters from the storage namespace. The
+  default will change in a future release.
+* Reduce Redis round-trips for `peek_data`, `pop_data` and `delete_data`, and
+  make `RedisExpireStorage.incr()` set the TTL atomically w/ the increment.
+* Skip the exclusive lock in `SqliteStorage.dequeue()` when the queue is
+  empty, so idle consumers no longer block producers and the scheduler.
+* Batch the `SqliteStorage.read_schedule()` delete to avoid sqlite's
+  parameter limit when many tasks come due at once. Same fix in `SqlHuey`.
+* Order `SqliteStorage.read_schedule()` and `SqlHuey.read_schedule()` by
+  `(timestamp, id)`, matching `PostgresStorage`.
+* Add `queue` to the sqlite task index (`task_queue_priority_id`) so queues
+  sharing a file no longer scan each other's rows. The old `task_priority_id`
+  index is dropped when the schema is initialized. I'll get rid of the
+  temporary in-band drop in a few releases.
+* Add `peek_many()` to the storage API. Revocation checks now fetch the task
+  and task-class keys in one round trip.
+* Return str keys from `result_items()` on every storage backend. Redis and
+  File storage previously returned bytes.
+
+Stats:
+
+* Better handling for `timeout`, `locked`, `rate-limited` and `retrying` in
+  stats recorder.
+* Log dropped events in the stats recorder instead of failing silently.
+* Fix stats recorder `max_events` pruning to count rows per queue. With
+  multiple queues sharing a stats db, each queue retained only a fraction of
+  the configured cap.
+* Add `inflight_hours` option to stats recorder, replacing the hardcoded 6
+  hour in-flight cutoff.
+* Require the `change_hueydashboard` permission for the django admin
+  dashboard's revoke, restore and flush controls. Previously any staff user
+  who could view the dashboard could also flush the queue.
+* Add `huey[stats]` extra which installs ol' peewee.
+
 [View commits](https://github.com/coleifer/huey/compare/3.3.4...master)
 
 ## 3.3.4

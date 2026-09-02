@@ -9,8 +9,8 @@ retrying, and so on) into a pair of `peewee <https://docs.peewee-orm.com/>`_
 tables. From those tables you can compute throughput, error-rates, per-task
 timing and a live view of what is currently running.
 
-The recorder depends only on peewee and writes to any peewee ``Database`` you
-give it (SQLite, Postgres, MySQL). It is the engine behind the
+The recorder depends only on peewee (``pip install huey[stats]``) and writes
+to any peewee ``Database`` you give it (SQLite, Postgres, MySQL). It is the engine behind the
 :ref:`Flask-Peewee admin panel <flask-admin>` and the
 :ref:`Django admin dashboard <django-admin-stats>`, but it stands on its own:
 use it to feed a custom dashboard, a metrics exporter or a CLI report.
@@ -60,11 +60,11 @@ available afterwards as ``huey._stats``) exposes read helpers:
     stats.recent_events(limit=50)  # most recent events, newest first
     stats.inflight()               # tasks currently executing
 
-Two tables are created when the recorder starts (unless ``create_tables=False``):
-``huey_event``, an append-only event log trimmed to the retention settings, and
-``huey_inflight``, one row per currently-executing task. Writes are buffered and
-flushed by a background thread, so recording adds negligible overhead to task
-execution.
+Two tables are created when the recorder starts (unless
+``create_tables=False``): ``huey_event``, an append-only event log trimmed to
+the retention settings, and ``huey_inflight``, one row per currently-executing
+task. Writes are buffered and flushed by a background thread, so recording adds
+negligible overhead to task execution.
 
 API
 ^^^
@@ -79,6 +79,8 @@ API
         ``huey_event`` and ``huey_inflight`` tables live.
     :param int retention_hours: how long to keep events, in hours (default 48).
     :param int max_events: maximum events retained per queue (default 2000).
+    :param int inflight_hours: how long a task may remain in-flight before its
+        row is presumed orphaned and pruned, in hours (default 6).
     :param bool capture_args: also store a truncated repr of each task's args
         and kwargs (default False).
     :param bool create_tables: create the tables if they do not exist

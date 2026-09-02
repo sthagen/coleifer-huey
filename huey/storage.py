@@ -172,6 +172,20 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
+    def peek_many(self, keys):
+        """
+        Non-destructively read the values at the given keys.
+
+        :param list keys: Keys to read.
+        :return: Dictionary of key to value for the keys that exist.
+        """
+        accum = {}
+        for key in keys:
+            value = self.peek_data(key)
+            if value is not EmptyData:
+                accum[key] = value
+        return accum
+
     def pop_data(self, key):
         """
         Destructively read the value at the given key, if it exists.
@@ -218,14 +232,20 @@ class BaseStorage(object):
         """
         raise NotImplementedError
 
-    def put_if_empty(self, key, value):
+    def put_if_empty(self, key, value, ttl=None):
         """
         Atomically write data only if the key is not already set.
 
         :param bytes key: Key to check/set.
         :param bytes value: Arbitrary data.
+        :param int ttl: Seconds until the key expires. Supported by the memory
+            and redis storages, others raise ``NotImplementedError``. With
+            ``RedisStorage`` the server must support hash-field TTL (redis
+            7.4+ or valkey 9+). ``RedisExpireStorage`` works on any version.
         :return: Boolean whether key/value was set.
         """
+        if ttl is not None:
+            raise NotImplementedError('ttl is not supported by this storage.')
         if self.has_data_for_key(key):
             return False
         self.put_data(key, value)
@@ -255,6 +275,7 @@ class BaseStorage(object):
         Non-destructively read all the key/value pairs from the data-store.
 
         :return: Dictionary mapping all key/value pairs in the data-store.
+            Keys written by huey are returned as unicode strings.
         """
         raise NotImplementedError
 
@@ -301,6 +322,7 @@ class BlackHoleStorage(BaseStorage):
     def peek_data(self, key): return EmptyData
     def pop_data(self, key): return EmptyData
     def has_data_for_key(self, key): return False
+    def put_if_empty(self, key, value, ttl=None): return True
     def incr(self, key, amount=1): return amount
     def delete_counter(self, key): pass
     def result_store_size(self): return 0
@@ -315,6 +337,7 @@ class MemoryStorage(BaseStorage):
         self._c = 0  # Counter to ensure FIFO behavior for queue.
         self._queue = []
         self._results = {}
+        self._expires = {}
         self._schedule = []
         self._counters = {}
         self._lock = threading.RLock()
@@ -375,23 +398,35 @@ class MemoryStorage(BaseStorage):
     def flush_schedule(self):
         self._schedule = []
 
+    def _expire(self, key):
+        if self._expires.get(key, float('inf')) <= time.monotonic():
+            del self._expires[key]
+            self._results.pop(key, None)
+
     def put_data(self, key, value, is_result=False):
         self._results[key] = value
+        self._expires.pop(key, None)
 
     def peek_data(self, key):
+        self._expire(key)
         return self._results.get(key, EmptyData)
 
     def pop_data(self, key):
+        self._expire(key)
         return self._results.pop(key, EmptyData)
 
     def has_data_for_key(self, key):
+        self._expire(key)
         return key in self._results
 
-    def put_if_empty(self, key, value):
+    def put_if_empty(self, key, value, ttl=None):
         with self._lock:
+            self._expire(key)
             if key in self._results:
                 return False
-            self._results[key] = value
+            self.put_data(key, value)
+            if ttl is not None:
+                self._expires[key] = time.monotonic() + ttl
             return True
 
     def incr(self, key, amount=1):
@@ -433,8 +468,8 @@ class RedisStorage(BaseStorage):
 
     def __init__(self, name='huey', blocking=True, read_timeout=1,
                  connection_pool=None, url=None, client_name=None,
-                 notify_result=False, notify_result_ttl=86400,
-                 **connection_params):
+                 notify_result=False, notify_result_ttl=60,
+                 clean_name=True, **connection_params):
 
         if Redis is None:
             raise ConfigurationError('"redis" python module not found, cannot '
@@ -462,7 +497,7 @@ class RedisStorage(BaseStorage):
         self.connection_params = connection_params
         self._pop = self.conn.register_script(SCHEDULE_POP_LUA)
 
-        self.name = self.clean_name(name)
+        self.name = self.clean_name(name) if clean_name else name
         self.queue_key = 'huey.redis.%s' % self.name
         self.schedule_key = 'huey.schedule.%s' % self.name
         self.result_key = 'huey.results.%s' % self.name
@@ -486,6 +521,23 @@ class RedisStorage(BaseStorage):
             version = '0.0.0'  # Assume old, int timeouts always work.
         return tuple(int(i) if i.isdigit() else 999
                      for i in version.split('.'))
+
+    @cached_property
+    def supports_hash_ttl(self):
+        # HEXPIRE needs redis 7.4+ or valkey 9+. Valkey reports redis_version
+        # 7.2, so its own version field is checked separately.
+        if not hasattr(self.conn, 'hexpire'):
+            return False
+        info = self.conn.info('server')
+        for key, minver in (('redis_version', (7, 4)),
+                            ('valkey_version', (9,))):
+            try:
+                version = tuple(int(p) for p in str(info[key]).split('.')[:2])
+            except (KeyError, ValueError):
+                continue
+            if version >= minver:
+                return True
+        return False
 
     def clean_name(self, name):
         return re.sub('[^A-Za-z0-9_]', '', name)
@@ -562,19 +614,22 @@ class RedisStorage(BaseStorage):
             self._notify(key)
 
     def peek_data(self, key):
-        pipe = self.conn.pipeline()
-        pipe.hexists(self.result_key, key)
-        pipe.hget(self.result_key, key)
-        exists, val = pipe.execute()
-        return EmptyData if not exists else val
+        val = self.conn.hget(self.result_key, key)
+        return EmptyData if val is None else val
+
+    def peek_many(self, keys):
+        values = self.conn.hmget(self.result_key, keys)
+        return {k: v for k, v in zip(keys, values) if v is not None}
 
     def pop_data(self, key):
         pipe = self.conn.pipeline()
-        pipe.hexists(self.result_key, key)
         pipe.hget(self.result_key, key)
         pipe.hdel(self.result_key, key)
-        exists, val, n = pipe.execute()
-        return EmptyData if not exists else val
+        val, _ = pipe.execute()
+        return EmptyData if val is None else val
+
+    def delete_data(self, key):
+        return self.conn.hdel(self.result_key, key) != 0
 
     def wait_result(self, key, timeout=None, backoff=1.15, max_delay=1.0):
         if not self.notify_result:
@@ -596,13 +651,20 @@ class RedisStorage(BaseStorage):
             self.conn.delete(nkey)
             return True
 
-        return False
+        return self.has_data_for_key(key)
 
     def has_data_for_key(self, key):
         return self.conn.hexists(self.result_key, key)
 
-    def put_if_empty(self, key, value):
-        return self.conn.hsetnx(self.result_key, key, value)
+    def put_if_empty(self, key, value, ttl=None):
+        if ttl is not None and not self.supports_hash_ttl:
+            raise NotImplementedError('ttl requires hash-field TTL support '
+                                      '(redis 7.4+ or valkey 9+).')
+        if not self.conn.hsetnx(self.result_key, key, value):
+            return False
+        if ttl is not None:
+            self.conn.hexpire(self.result_key, ttl, key)
+        return True
 
     def incr(self, key, amount=1):
         return self.conn.hincrby(self.counter_key, key, amount)
@@ -614,7 +676,8 @@ class RedisStorage(BaseStorage):
         return self.conn.hlen(self.result_key)
 
     def result_items(self):
-        return self.conn.hgetall(self.result_key)
+        return {key.decode('utf8'): value for key, value
+                in self.conn.hgetall(self.result_key).items()}
 
     def flush_results(self):
         self.conn.delete(self.result_key)
@@ -650,11 +713,12 @@ class RedisExpireStorage(RedisStorage):
             self.conn.set(self.result_key(key), value)
 
     def peek_data(self, key):
-        pipe = self.conn.pipeline()
-        pipe.exists(self.result_key(key))
-        pipe.get(self.result_key(key))
-        exists, val = pipe.execute()
-        return EmptyData if not exists else val
+        val = self.conn.get(self.result_key(key))
+        return EmptyData if val is None else val
+
+    def peek_many(self, keys):
+        values = self.conn.mget([self.result_key(k) for k in keys])
+        return {k: v for k, v in zip(keys, values) if v is not None}
 
     # Here we explicitly prevent result items from being removed by using the
     # same implementation for "pop" (get and delete) as we do for "peek"
@@ -667,13 +731,15 @@ class RedisExpireStorage(RedisStorage):
     def has_data_for_key(self, key):
         return self.conn.exists(self.result_key(key)) != 0
 
-    def put_if_empty(self, key, value):
-        return self.conn.setnx(self.result_key(key), value)
+    def put_if_empty(self, key, value, ttl=None):
+        return bool(self.conn.set(self.result_key(key), value, nx=True,
+                                  ex=ttl))
 
     def incr(self, key, amount=1):
-        res = self.conn.incr(self.counter_key(key), amount)
-        self.conn.expire(self.counter_key(key), self._expire_time)
-        return res
+        pipe = self.conn.pipeline()
+        pipe.incr(self.counter_key(key), amount)
+        pipe.expire(self.counter_key(key), self._expire_time)
+        return pipe.execute()[0]
 
     def delete_counter(self, key):
         self.conn.delete(self.counter_key(key))
@@ -690,7 +756,7 @@ class RedisExpireStorage(RedisStorage):
         if keys:
             pfx_len = len(self.result_prefix)
             for key, value in zip(keys, self.conn.mget(keys)):
-                accum[key[pfx_len:]] = value
+                accum[key[pfx_len:].decode('utf8')] = value
         return accum
 
     def _counter_keys(self):
@@ -830,14 +896,15 @@ class SqliteStorage(BaseSqlStorage):
     table_task = ('create table if not exists task ('
                   'id integer not null primary key, queue text not null, '
                   'data blob not null, priority real not null default 0.0)')
-    index_task = ('create index if not exists task_priority_id on task '
-                  '(priority desc, id asc)')
+    index_task = ('create index if not exists task_queue_priority_id on task '
+                  '(queue, priority desc, id)')
+    drop_index_task = 'drop index if exists task_priority_id'  # Old index.
     table_counter = ('create table if not exists counter ('
                      'queue text not null, key text not null, '
                      'value integer not null default 0, '
                      'primary key(queue, key))')
     ddl = [table_kv, table_sched, index_sched, table_task, index_task,
-           table_counter]
+           table_counter, drop_index_task]
 
     def __init__(self, name='huey', filename='huey.db', cache_mb=8,
                  fsync=None, journal_mode='wal', timeout=5, strict_fifo=False,
@@ -883,6 +950,11 @@ class SqliteStorage(BaseSqlStorage):
                  (self.name, self.to_blob(data), priority or 0), commit=True)
 
     def dequeue(self):
+        # Quick check without the full exclusive lock.
+        if not self.sql('select 1 from task where queue = ? limit 1',
+                        (self.name,), results=True):
+            return
+
         with self.db(commit=True) as curs:
             curs.execute('select id, data from task where queue = ? '
                          'order by priority desc, id limit 1', (self.name,))
@@ -918,15 +990,16 @@ class SqliteStorage(BaseSqlStorage):
         with self.db(commit=True) as curs:
             params = (self.name, ts.timestamp())
             curs.execute('select id, data from schedule where '
-                         'queue = ? and timestamp <= ?', params)
+                         'queue = ? and timestamp <= ? order by timestamp, id',
+                         params)
             id_list, data = [], []
             for task_id, task_data in curs.fetchall():
                 id_list.append(task_id)
                 data.append(task_data)
-            if id_list:
-                plist = ','.join('?' * len(id_list))
-                curs.execute('delete from schedule where id IN (%s)' % plist,
-                             id_list)
+            for i in range(0, len(id_list), 500):
+                chunk = id_list[i:i + 500]
+                curs.execute('delete from schedule where id in (%s)' %
+                             ','.join('?' * len(chunk)), chunk)
             return data
 
     def schedule_size(self):
@@ -955,6 +1028,16 @@ class SqliteStorage(BaseSqlStorage):
                        (self.name, key), results=True)
         return res[0][0] if res else EmptyData
 
+    def peek_many(self, keys):
+        accum = {}
+        for i in range(0, len(keys), 500):
+            chunk = keys[i:i + 500]
+            accum.update(self.sql(
+                'select key, value from kv where queue = ? and key in (%s)' %
+                ','.join('?' * len(chunk)), (self.name,) + tuple(chunk),
+                results=True))
+        return accum
+
     def pop_data(self, key):
         with self.db(commit=True) as curs:
             if self.sqlite_version_info >= (3, 35, 0):
@@ -978,7 +1061,9 @@ class SqliteStorage(BaseSqlStorage):
         return bool(self.sql('select 1 from kv where queue=? and key=?',
                              (self.name, key), results=True))
 
-    def put_if_empty(self, key, value):
+    def put_if_empty(self, key, value, ttl=None):
+        if ttl is not None:
+            raise NotImplementedError('ttl is not supported by this storage.')
         try:
             with self.db(commit=True) as curs:
                 curs.execute('insert or abort into kv '
@@ -1290,6 +1375,12 @@ class PostgresStorage(BaseSqlStorage):
                        (self.name, self._key(key)), results=True)
         return bytes(res[0][0]) if res else EmptyData
 
+    def peek_many(self, keys):
+        res = self.sql('select key, value from {} where queue = %s and '
+                       'key = any(%s)'.format(self.table_kv),
+                       (self.name, [self._key(k) for k in keys]), results=True)
+        return dict((k, bytes(v)) for k, v in res)
+
     def pop_data(self, key):
         with self.db() as curs:
             curs.execute('delete from {} where queue = %s and key = %s '
@@ -1303,7 +1394,9 @@ class PostgresStorage(BaseSqlStorage):
                              'key = %s'.format(self.table_kv),
                              (self.name, self._key(key)), results=True))
 
-    def put_if_empty(self, key, value):
+    def put_if_empty(self, key, value, ttl=None):
+        if ttl is not None:
+            raise NotImplementedError('ttl is not supported by this storage.')
         with self.db() as curs:
             curs.execute('insert into {} (queue, key, value) '
                          'values (%s, %s, %s) '
@@ -1521,7 +1614,9 @@ class FileStorage(BaseStorage):
             fh.write(key)
             fh.write(value)
 
-    def put_if_empty(self, key, value):
+    def put_if_empty(self, key, value, ttl=None):
+        if ttl is not None:
+            raise NotImplementedError('ttl is not supported by this storage.')
         with self.lock:
             if os.path.exists(self.path_for_key(key)):
                 return False
@@ -1601,7 +1696,8 @@ class FileStorage(BaseStorage):
                 path = os.path.join(root, filename)
                 with open(path, 'rb') as fh:
                     key, value = self._unpack_result(fh.read())
-                accum[key] = value
+                if key is not None:
+                    accum[key.decode('utf8')] = value
         return accum
 
     def flush_results(self):

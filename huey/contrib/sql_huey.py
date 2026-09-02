@@ -162,6 +162,7 @@ class SqlStorage(BaseStorage):
         self.check_conn()
         query = (self.schedule(self.Schedule.id, self.Schedule.data)
                  .where(self.Schedule.timestamp <= timestamp)
+                 .order_by(self.Schedule.timestamp, self.Schedule.id)
                  .tuples())
         if self.for_update:
             query = query.for_update(self.for_update)
@@ -172,10 +173,11 @@ class SqlStorage(BaseStorage):
                 return []
 
             id_list, data = zip(*results)
-            (self.Schedule
-             .delete()
-             .where(self.Schedule.id.in_(id_list))
-             .execute())
+            for chunk in chunked(id_list, 500):
+                (self.Schedule
+                 .delete()
+                 .where(self.Schedule.id.in_(chunk))
+                 .execute())
 
             return list(data)
 
@@ -216,6 +218,16 @@ class SqlStorage(BaseStorage):
         else:
             return kv.value
 
+    def peek_many(self, keys):
+        self.check_conn()
+        accum = {}
+        for i in range(0, len(keys), 500):
+            query = (self.kv(self.KV.key, self.KV.value)
+                     .where(self.KV.key.in_(keys[i:i + 500]))
+                     .tuples())
+            accum.update(query)
+        return accum
+
     def pop_data(self, key):
         self.check_conn()
         query = self.kv().where(self.KV.key == key)
@@ -237,7 +249,9 @@ class SqlStorage(BaseStorage):
         self.check_conn()
         return self.kv().where(self.KV.key == key).exists()
 
-    def put_if_empty(self, key, value):
+    def put_if_empty(self, key, value, ttl=None):
+        if ttl is not None:
+            raise NotImplementedError('ttl is not supported by this storage.')
         self.check_conn()
         try:
             with self.database.atomic():

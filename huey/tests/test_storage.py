@@ -2,9 +2,12 @@ import datetime
 import hashlib
 import itertools
 import os
+import random
 import shutil
 import sqlite3
+import struct
 import threading
+import time
 import unittest
 import uuid
 from queue import Queue
@@ -54,11 +57,40 @@ requires_redis = unittest.skipIf(REDIS_VERSION == 0, 'requires redis server')
 
 class StorageTests(object):
     destructive_reads = True
+    supports_ttl = True
 
     def setUp(self):
         super(StorageTests, self).setUp()
         self.s = self.huey.storage
         self.s.flush_all()
+
+    def test_peek_many(self):
+        self.s.put_data('k1', b'v1')
+        self.s.put_data('k2', b'v2')
+        self.assertEqual(self.s.peek_many(['k1', 'kx', 'k2']),
+                         {'k1': b'v1', 'k2': b'v2'})
+        self.assertEqual(self.s.peek_many(['kx']), {})
+
+    def test_result_items_str_keys(self):
+        # Task ids are stored as str, and every backend returns them as str.
+        self.s.put_data('k1', b'v1')
+        self.s.put_data('k2', b'v2')
+        self.assertEqual(self.s.result_items(), {'k1': b'v1', 'k2': b'v2'})
+
+    def test_put_if_empty_ttl(self):
+        if not self.supports_ttl:
+            self.assertRaises(NotImplementedError, self.s.put_if_empty,
+                              b'k1', b'v1', 1)
+            return
+
+        self.assertTrue(self.s.put_if_empty(b'k1', b'v1', ttl=1))
+        self.assertFalse(self.s.put_if_empty(b'k1', b'v2', ttl=1))
+        self.assertEqual(self.s.peek_data(b'k1'), b'v1')
+        time.sleep(1.1)
+        self.assertFalse(self.s.has_data_for_key(b'k1'))
+        self.assertTrue(self.s.put_if_empty(b'k1', b'v3'))
+        self.assertFalse(self.s.put_if_empty(b'k1', b'v4'))
+        self.assertEqual(self.s.peek_data(b'k1'), b'v3')
 
     def tearDown(self):
         super(StorageTests, self).tearDown()
@@ -259,6 +291,18 @@ class TestRedisStorage(StorageTests, BaseTestCase):
     def get_huey(self):
         return RedisHuey(utc=False)
 
+    @property
+    def supports_ttl(self):
+        return self.s.supports_hash_ttl
+
+    def test_put_if_empty_ttl_unsupported(self):
+        self.s.supports_hash_ttl = False
+        self.assertRaises(NotImplementedError, self.s.put_if_empty,
+                          b'k1', b'v1', 1)
+        self.assertFalse(self.s.has_data_for_key(b'k1'))
+        self.assertTrue(self.s.put_if_empty(b'k1', b'v1'))
+        self.assertEqual(self.s.peek_data(b'k1'), b'v1')
+
     def test_conflicting_init_args(self):
         options = {'host': 'localhost', 'url': 'redis://localhost',
                    'connection_pool': ConnectionPool()}
@@ -269,10 +313,50 @@ class TestRedisStorage(StorageTests, BaseTestCase):
         # None values are fine, however.
         RedisHuey(host=None, port=None, db=None, url='redis://localhost')
 
+    def test_name_not_mangled(self):
+        s3 = RedisHuey('app-v1', utc=False).storage
+        self.assertEqual(s3.name, 'appv1')
+        s1 = RedisHuey('app-v1', utc=False, clean_name=False).storage
+        s2 = RedisHuey('appv1', utc=False).storage
+        self.assertEqual(s1.name, 'app-v1')
+        self.assertNotEqual(s1.queue_key, s2.queue_key)
+        s1.flush_all()
+        s2.flush_all()
+        s1.enqueue(b'i1')
+        self.assertEqual(s2.queue_size(), 0)
+        self.assertEqual(s1.dequeue(), b'i1')
+        s1.flush_all()
+
+    def test_empty_value(self):
+        self.s.put_data(b'k1', b'')
+        self.assertEqual(self.s.peek_data(b'k1'), b'')
+        self.assertEqual(self.s.pop_data(b'k1'), b'')
+
 
 class TestRedisStorageWaitResult(TestRedisStorage):
     def get_huey(self):
         return RedisHuey(utc=False, notify_result=True, notify_result_ttl=30)
+
+    def test_notify_ttl(self):
+        key = str(uuid.uuid4())
+        self.s.put_data(key, b'v1', is_result=True)
+        ttl = self.s.conn.ttl(self.s.notify_prefix + key)
+        self.assertTrue(0 < ttl <= 30)
+        self.s.pop_data(key)
+        self.assertTrue(self.s.wait_result(key, timeout=1))
+        self.assertFalse(self.s.conn.exists(self.s.notify_prefix + key))
+
+    def test_wait_result_multiple_waiters(self):
+        key = str(uuid.uuid4())
+        q = Queue()
+        def waiter():
+            q.put(self.s.wait_result(key, timeout=2))
+        threads = [threading.Thread(target=waiter) for _ in range(2)]
+        for t in threads: t.start()
+        time.sleep(0.2)
+        self.s.put_data(key, b'v1', is_result=True)
+        for t in threads: t.join()
+        self.assertEqual([q.get(), q.get()], [True, True])
 
 
 @requires_redis
@@ -316,11 +400,15 @@ class TestRedisExpireStorage(StorageTests, BaseTestCase):
         self.assertTrue(self.s.delete_data(b'k2'))
         self.assertFalse(self.s.delete_data(b'k2'))
 
+        # Counters expire.
+        self.assertEqual(self.s.incr(b'c1'), 1)
+        self.assertTrue(3580 <= conn.ttl(self.s.counter_key(b'c1')) <= 3600)
+
         # Check the result items.
         self.assertEqual(self.s.result_items(), {
-            b'k1': b'v1',
-            b'k3': b'v3',
-            b'k4': b'v4'})
+            'k1': b'v1',
+            'k3': b'v3',
+            'k4': b'v4'})
         self.assertEqual(self.s.result_store_size(), 3)
 
     def test_integration_2(self):
@@ -434,6 +522,8 @@ class TestRedisStorageOffline(BaseTestCase):
 
 
 class TestSqliteStorage(StorageTests, BaseTestCase):
+    supports_ttl = False
+
     def tearDown(self):
         super(TestSqliteStorage, self).tearDown()
         if os.path.exists('huey_storage.db'):
@@ -458,9 +548,76 @@ class TestSqliteStorage(StorageTests, BaseTestCase):
         curs = self.s.conn.execute('pragma busy_timeout')
         self.assertEqual(curs.fetchone(), (3000,))
 
+    def test_read_schedule_large(self):
+        n = 5000
+        base = datetime.datetime(2000, 1, 1)
+        order = list(range(n))
+        random.Random(1).shuffle(order)
+        for i in order:
+            self.s.add_to_schedule(b'%d' % i,
+                                   base + datetime.timedelta(seconds=i))
+        self.assertEqual(self.s.schedule_size(), n)
+        sched = self.s.read_schedule(base + datetime.timedelta(seconds=n))
+        self.assertEqual(sched, [b'%d' % i for i in range(n)])
+        self.assertEqual(self.s.schedule_size(), 0)
+
+    def test_shared_file_queues(self):
+        other = SqliteHuey(name='other', filename='huey_storage.db',
+                           timeout=3).storage
+        try:
+            self.s.enqueue(b'a1')
+            other.enqueue(b'b1', priority=5)
+            self.s.enqueue(b'a2', priority=3)
+            other.enqueue(b'b2')
+            self.assertEqual(self.s.queue_size(), 2)
+            self.assertEqual(other.queue_size(), 2)
+            self.assertEqual(self.s.enqueued_items(), [b'a2', b'a1'])
+            self.assertEqual(other.enqueued_items(), [b'b1', b'b2'])
+            self.assertEqual(self.s.dequeue(), b'a2')
+            self.assertEqual(other.dequeue(), b'b1')
+            self.assertEqual(self.s.dequeue(), b'a1')
+            self.assertTrue(self.s.dequeue() is None)
+            self.assertEqual(other.queue_size(), 1)
+            other.flush_queue()
+            self.assertTrue(other.dequeue() is None)
+        finally:
+            other.close()
+
+    def test_dequeue_multithreaded(self):
+        nthreads, ntasks = 8, 50
+        for i in range(nthreads * ntasks):
+            self.s.enqueue(b'%d' % i)
+
+        out_q = Queue()
+
+        def dequeue_tasks():
+            while True:
+                data = self.s.dequeue()
+                if data is None:
+                    break
+                out_q.put(int(data))
+
+        threads = [threading.Thread(target=dequeue_tasks)
+                   for _ in range(nthreads)]
+        for t in threads: t.start()
+        for t in threads: t.join(timeout=10.)
+
+        self.assertEqual(self.s.queue_size(), 0)
+        seen = sorted(out_q.get() for _ in range(out_q.qsize()))
+        self.assertEqual(seen, list(range(nthreads * ntasks)))
+
+    def test_task_index(self):
+        curs = self.s.conn.execute('select name from sqlite_master where '
+                                   'type = ? and tbl_name = ?',
+                                   ('index', 'task'))
+        self.assertEqual([r[0] for r in curs.fetchall()],
+                         ['task_queue_priority_id'])
+
 
 @unittest.skipIf(cysqlite is None, 'requires cysqlite')
 class TestCySqliteStorage(StorageTests, BaseTestCase):
+    supports_ttl = False
+
     def tearDown(self):
         super(TestCySqliteStorage, self).tearDown()
         if os.path.exists('huey_storage.db'):
@@ -514,11 +671,13 @@ class TestFileStorageMethods(StorageTests, BaseTestCase):
     path = '/tmp/test-huey-storage'
     result_path = '/tmp/test-huey-storage/results'
     queue_path = '/tmp/test-huey-storage/queue'
+    supports_ttl = False
 
     def tearDown(self):
         super(TestFileStorageMethods, self).tearDown()
-        if os.path.exists(self.path):
-            shutil.rmtree(self.path)
+        for path in (self.path, self.path + '-other'):
+            if os.path.exists(path):
+                shutil.rmtree(path)
 
     def test_float_priority(self):
         # Fractional priorities are truncated rather than raising.
@@ -558,6 +717,17 @@ class TestFileStorageMethods(StorageTests, BaseTestCase):
         s.flush_results()
         self.assertTrue(os.path.exists(self.result_path))
         self.assertEqual(os.listdir(self.result_path), [])
+
+    def test_filesystem_result_items_truncated(self):
+        s = self.huey.storage
+        s.put_data(b'k1', b'v1')
+
+        filename = s.path_for_key(b'k2')
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        with open(filename, 'wb') as fh:
+            fh.write(struct.pack('>I', 8) + b'k2')
+
+        self.assertEqual(s.result_items(), {'k1': b'v1'})
 
     def test_fs_multithreaded(self):
         l = threading.Lock()
@@ -644,5 +814,7 @@ except ImportError:
 
 @unittest.skipIf(ValkeyGlideHuey is None, 'valkey-glide-sync not installed')
 class TestValkeyGlideStorage(StorageTests, BaseTestCase):
+    supports_ttl = False
+
     def get_huey(self):
         return ValkeyGlideHuey(utc=False)

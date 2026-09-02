@@ -1,0 +1,103 @@
+{% extends "admin/base_site.html" %}
+{% load hueystats %}
+
+{% block extrastyle %}{{ block.super }}
+{% include "admin/hueystats/_styles.html" %}
+<style>
+  .hs-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end;
+                margin-bottom: 12px; }
+  .hs-filters label { display: block; font-size: .7rem; text-transform: uppercase;
+                      letter-spacing: .03em; color: var(--body-quiet-color); }
+  .hs-pager { display: flex; justify-content: space-between; align-items: center;
+              margin-top: 12px; font-size: .8rem; }
+</style>
+{% endblock %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a>
+  &rsaquo; <a href="{% url 'admin:app_list' app_label='hueystats' %}">Huey</a>
+  &rsaquo; <a href="{% url 'admin:hueystats_hueydashboard_changelist' %}">Dashboard</a>
+  &rsaquo; Events
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  {% if not enabled %}
+    <div class="module hs-mod hs-pad hs-empty">
+      The stats recorder is not running.
+    </div>
+  {% else %}
+  <div class="module hs-mod hs-pad">
+    <form method="get" class="hs-filters">
+      <div>
+        <label for="hs-signal">Signal</label>
+        <select name="signal" id="hs-signal">
+          <option value="">All</option>
+          {% for s in signals %}
+            <option value="{{ s }}" {% if s == signal %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="hs-task">Task</label>
+        <select name="task" id="hs-task">
+          <option value="">All</option>
+          {% for t in tasks %}
+            <option value="{{ t }}" {% if t == task %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label for="hs-q">Search</label>
+        <input type="search" name="q" id="hs-q" value="{{ q|default:'' }}"
+               placeholder="task id, name or error">
+      </div>
+      <div>
+        <button type="submit" class="hs-btn">Filter</button>
+        <a class="hs-btn" href="{{ request.path }}">Reset</a>
+      </div>
+    </form>
+  </div>
+
+  <div class="module hs-mod">
+    <h2>{{ total }} event{{ total|pluralize }}</h2>
+    <table class="hs-tbl">
+      <thead><tr><th>Time</th><th>Task</th><th>ID</th><th>Signal</th>
+                 <th class="hs-r">Duration</th><th>Error</th></tr></thead>
+      <tbody>
+      {% for e in events %}
+        <tr>
+          <td class="hs-mono hs-quiet">{{ e.time }}</td>
+          <td><strong>{{ e.task }}</strong></td>
+          <td class="hs-mono hs-quiet" title="{{ e.task_id }}">{{ e.task_id|slice:":8" }}</td>
+          <td>{% sigbadge e.signal %}</td>
+          <td class="hs-r">{{ e.duration|dur }}</td>
+          <td class="hs-errmsg" title="{{ e.error|default:'' }}">{{ e.error|default:'' }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="6" class="hs-empty">No matching events.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="hs-pager">
+    <div>
+      {% if page > 0 %}
+        <a class="hs-btn" href="?{{ qs }}p={{ prev_page }}">&lsaquo; Newer</a>
+      {% endif %}
+    </div>
+    <div class="hs-quiet">
+      {% if total %}{{ start }}&ndash;{{ end }} of {{ total }}{% endif %}
+    </div>
+    <div>
+      {% if has_next %}
+        <a class="hs-btn" href="?{{ qs }}p={{ next_page }}">Older &rsaquo;</a>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

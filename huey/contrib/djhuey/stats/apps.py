@@ -1,8 +1,8 @@
 import logging
+import os
 
 from django.apps import AppConfig
 from django.conf import settings
-from django.core.exceptions import ImproperlyConfigured
 
 import peewee
 
@@ -11,36 +11,33 @@ logger = logging.getLogger('huey')
 
 
 def stats_database():
-    options = dict(getattr(settings, 'HUEY_STATS', None) or {})
-    db = options.pop('database', None)
+    """
+    Stats are recorded to huey's own sqlite database. Point
+    HUEY_STATS['database'] at a peewee Database or db-url to store them
+    elsewhere, e.g. the database Django uses.
+    """
+    options = getattr(settings, 'HUEY_STATS', None) or {}
+    db = options.get('database')
     if isinstance(db, peewee.Database):
-        return db, options
+        return db
     elif isinstance(db, str):
         from playhouse.db_url import connect
-        return connect(db), options
+        return connect(db)
 
-    conn = settings.DATABASES['default']
-    engine = conn['ENGINE'].rsplit('.', 1)[-1]
-    if engine == 'sqlite3':
-        return peewee.SqliteDatabase(str(conn['NAME'])), options
+    filename = options.get('filename') or 'huey-stats.db'
+    base = getattr(settings, 'BASE_DIR', None)
+    if base and not os.path.isabs(filename):
+        filename = os.path.join(str(base), filename)
+    # The consumer and every web process write to this file.
+    return peewee.SqliteDatabase(filename, timeout=5, pragmas={
+        'journal_mode': 'wal', 'synchronous': 1})
 
-    kwargs = {'user': conn.get('USER'), 'password': conn.get('PASSWORD'),
-              'host': conn.get('HOST'), 'port': conn.get('PORT')}
-    kwargs = {k: v for k, v in kwargs.items() if v}
-    if 'port' in kwargs:
-        kwargs['port'] = int(kwargs['port'])
-    # OPTIONS are passed verbatim to the driver, except keys Django consumes.
-    skip = ('assume_role', 'isolation_level', 'pool', 'server_side_binding')
-    kwargs.update({k: v for k, v in (conn.get('OPTIONS') or {}).items()
-                   if k not in skip})
-    if engine in ('postgresql', 'postgresql_psycopg2', 'postgis'):
-        return peewee.PostgresqlDatabase(conn['NAME'], **kwargs), options
-    elif engine == 'mysql':
-        return peewee.MySQLDatabase(conn['NAME'], **kwargs), options
-    raise ImproperlyConfigured(
-        'huey stats cannot map DATABASES["default"] (%s) to a peewee '
-        'database. Set HUEY_STATS["database"] to a peewee Database instance '
-        'or db-url string.' % conn['ENGINE'])
+
+def stats_options():
+    options = dict(getattr(settings, 'HUEY_STATS', None) or {})
+    options.pop('database', None)
+    options.pop('filename', None)
+    return options
 
 
 class HueyStatsConfig(AppConfig):
@@ -52,8 +49,7 @@ class HueyStatsConfig(AppConfig):
     def ready(self):
         from huey.contrib.djhuey import HUEY
         from huey.contrib.stats import enable_stats
-        db, options = stats_database()
         try:
-            enable_stats(HUEY, db, **options)
+            enable_stats(HUEY, stats_database(), **stats_options())
         except Exception:
             logger.exception('huey stats recorder failed to start.')

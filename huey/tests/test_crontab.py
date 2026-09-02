@@ -120,10 +120,42 @@ class TestCrontab(unittest.TestCase):
         self.assertRaises(ValueError, crontab, day_of_week='*/3')
 
     def test_invalid_crontabs_2(self):
-        self.assertTrue(crontab(minute='*abc'))
         invalid = ('abc', '*abc', 'a-b', '1-c', '0x9')
         for i in invalid:
+            self.assertRaises(ValueError, crontab, minute=i)
             self.assertRaises(ValueError, crontab, minute=i, strict=True)
+
+    def test_crontab_range_step(self):
+        validate = crontab(minute='0-30/5')
+        for x in range(60):
+            res = validate(datetime.datetime(2011, 1, 1, 1, x))
+            self.assertEqual(res, x in (0, 5, 10, 15, 20, 25, 30))
+
+        validate = crontab(hour='9-17/4', strict=True)
+        for x in range(24):
+            res = validate(datetime.datetime(2011, 1, 1, x))
+            self.assertEqual(res, x in (9, 13, 17))
+
+    def test_crontab_wrap_around_hour(self):
+        validate = crontab(minute='0', hour='22-2', strict=True)
+        for x in range(24):
+            res = validate(datetime.datetime(2011, 1, 1, x))
+            self.assertEqual(res, x in (22, 23, 0, 1, 2))
+
+    def test_crontab_wrap_around_day_of_week(self):
+        # jan 2, 2011 is a sunday
+        validate = crontab(minute='0', hour='0', day_of_week='1-7', strict=True)
+        for x in range(2, 9):
+            self.assertTrue(validate(datetime.datetime(2011, 1, x)))
+
+        validate = crontab(minute='0', hour='0', day_of_week='5-1', strict=True)
+        for x in range(2, 9):
+            res = validate(datetime.datetime(2011, 1, x))
+            self.assertEqual(res, x in (2, 3, 7, 8))
+
+    def test_crontab_empty(self):
+        self.assertRaises(ValueError, crontab, minute='foo')
+        self.assertRaises(ValueError, crontab, minute='0-30/0')
 
     def test_crontab_shortcuts(self):
         validate = crontab.hourly()

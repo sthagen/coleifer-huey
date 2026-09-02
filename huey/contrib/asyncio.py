@@ -1,11 +1,12 @@
 import asyncio
+import time
 
-from huey.api import Error
 from huey.constants import EmptyData
-from huey.exceptions import TaskException
+from huey.exceptions import ResultTimeout
 
 
-async def aget_result(res, backoff=1.15, max_delay=1.0, preserve=False):
+async def aget_result(res, backoff=1.15, max_delay=1.0, preserve=False,
+                      timeout=None):
     """
     Await a task result.
 
@@ -35,20 +36,26 @@ async def aget_result(res, backoff=1.15, max_delay=1.0, preserve=False):
             aget_result(r2),
             aget_result(r3))
 
+    Give up after ``timeout`` seconds by raising ``ResultTimeout``:
+
+        try:
+            result = await aget_result(rh, timeout=5)
+        except ResultTimeout:
+            ...
+
     NOTE: the Redis operation will be a normal blocking socket read, but in
     practice these will be super fast. The slow part is the necessity to wait
     between polling intervals (since the Redis command to read the result does
     not block).
     """
     delay = 0.1
-    while res._result is EmptyData:
-        delay = min(delay, max_delay)
-        if res._get(preserve) is EmptyData:
-            await asyncio.sleep(delay)
-            delay *= backoff
-    if isinstance(res._result, Error):
-        raise TaskException(res._result.metadata)
-    return res._result
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while res._get(preserve) is EmptyData:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ResultTimeout('timed out waiting for result')
+        await asyncio.sleep(delay)
+        delay = min(delay * backoff, max_delay)
+    return res.get(preserve=preserve)
 
 
 async def aget_result_group(rg, *args, **kwargs):

@@ -276,3 +276,26 @@ class TestSignals(BaseTestCase):
         self.assertEqual(self.execute_next(), 3)
         self.assertEqual(state1, ['executing', 'complete', 'executing'])
         self.assertEqual(state2, ['executing', 'complete'])
+
+    def test_handler_error_does_not_block_others(self):
+        state = []
+
+        @self.huey.signal(SIGNAL_EXECUTING, SIGNAL_COMPLETE)
+        def handler1(signal, task):
+            raise ValueError('broken')
+
+        @self.huey.signal(SIGNAL_EXECUTING, SIGNAL_COMPLETE)
+        def handler2(signal, task):
+            state.append(signal)
+
+        @self.huey.task()
+        def task_a(n):
+            return n + 1
+
+        r = task_a(1)
+        with self.assertLogs('huey', 'ERROR') as logs:
+            self.assertEqual(self.execute_next(), 2)
+        self.assertEqual(state, ['executing', 'complete'])
+        self.assertSignals(['enqueued', 'executing', 'complete'])
+        self.assertEqual(len(logs.records), 2)
+        self.assertIn('handler1', logs.records[0].getMessage())

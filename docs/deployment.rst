@@ -32,18 +32,23 @@ Signal        Consumer behavior
 ============  ==============================================================
 
 Nearly every process supervisor stops processes with ``SIGTERM`` by default,
-which huey treats as *stop immediately*. If you take nothing else from this
-page: configure your supervisor to stop huey with ``SIGINT``, and give it
-enough time for in-flight tasks to finish before escalating. Every example
-below includes the appropriate setting.
+which huey treats as *stop immediately*. For historical reasons, Huey will
+continue to use the above signals by default. Either configure your
+supervisor to stop huey with ``SIGINT``, or flip the graceful/immediate
+signals with ``--graceful-signal=TERM`` (``-g TERM``).
+
+Additionally, to prevent a graceful shutdown from running indefinitely on a
+stuck task, it is a good idea to specify ``--shutdown-timeout`` (``-t``). Any
+tasks still running when the timeout elapses are interrupted, with
+``SIGNAL_INTERRUPTED`` emitted for each. Set it a few seconds under the
+supervisor's own kill deadline, so huey interrupts stragglers cleanly.
 
 Two related points:
 
 * A graceful shutdown protects *running* tasks. A task interrupted by ``SIGKILL``
-  (or a power loss) is lost. Set the stop-timeout to comfortably exceed your
-  longest-running task, and register a ``SIGNAL_INTERRUPTED`` handler to
-  re-enqueue interrupted tasks (:ref:`recipe-interrupted-tasks`). As with any queue,
-  design tasks to be idempotent wherever possible.
+  (or a power loss) is lost. Register a ``SIGNAL_INTERRUPTED`` handler to
+  re-enqueue interrupted tasks (:ref:`recipe-interrupted-tasks`). As with any
+  queue, design tasks to be idempotent wherever possible.
 * Do not wrap the consumer in a shell script. The supervisor must signal the
   Python process directly, as an intermediate shell will interfere with
   signal delivery.
@@ -99,7 +104,7 @@ Notes:
 * ``STOPSIGNAL SIGINT`` makes ``docker stop`` request a graceful shutdown.
   The default grace period is only 10 seconds, however, so stop with
   ``docker stop -t 60 <container>`` (or set ``stop_grace_period`` in
-  compose) to give in-flight tasks time to finish.
+  compose) to match the consumer's ``-t 55``.
 * Always use the exec form of ``CMD`` (the JSON-array form, with no shell),
   so the consumer runs as PID 1 and receives signals directly.
 * Log to stdout (no ``-l``) and let the logging driver handle collection and
@@ -140,17 +145,18 @@ A minimal worker ``Deployment`` fragment:
       containers:
       - name: huey-worker
         image: my-app:latest
-        command: ["huey_consumer", "my_app.huey", "-w", "4", "-n"]
+        command: ["huey_consumer", "my_app.huey", "-w", "4", "-n",
+                  "-t", "55"]
       terminationGracePeriodSeconds: 60
 
 The things that matter:
 
 * Kubernetes honors the image's ``STOPSIGNAL``, so the Dockerfile above gets
   graceful shutdown for free. Without it, the kubelet sends ``SIGTERM`` and
-  running tasks are interrupted. (Alternatively, use a ``lifecycle.preStop``
-  hook, or rely on the ``SIGNAL_INTERRUPTED`` re-enqueue recipe.)
-* ``terminationGracePeriodSeconds`` is the SIGKILL deadline: set it to
-  comfortably exceed your longest-running task.
+  running tasks are interrupted. Adding ``-g TERM`` to the command works with
+  any image and needs no custom Dockerfile.
+* ``terminationGracePeriodSeconds`` is the SIGKILL deadline: keep it above
+  ``--shutdown-timeout`` so lagging tasks are interrupted cleanly first.
 * With ``replicas > 1``, periodic tasks must only be enqueued by one
   consumer. The simple pattern: a scalable worker Deployment started with
   ``-n`` / ``--no-periodic`` (as above), plus a single-replica "scheduler"
@@ -163,14 +169,17 @@ PaaS (Heroku-style)
 
     # Procfile
     web: gunicorn my_app.wsgi
-    worker: huey_consumer my_app.huey -w 4 -k thread
+    worker: huey_consumer my_app.huey -w 4 -k thread -g TERM -t 25
 
 Dyno-style process managers send ``SIGTERM`` with a short grace period
-(typically ~30 seconds) and offer no way to customize the signal, so running
-tasks will be interrupted on every deploy and restart. Registering the
-``SIGNAL_INTERRUPTED`` re-enqueue handler (:ref:`recipe-interrupted-tasks`)
-is essential on these platforms. Read the storage location from the
-environment:
+(typically ~30 seconds) and offer no way to customize the signal. Run the
+consumer with ``--graceful-signal=TERM`` so the deploy signal triggers a
+graceful shutdown, and set ``--shutdown-timeout`` a few seconds under the
+grace period so tasks that cannot finish in time are interrupted (and
+``SIGNAL_INTERRUPTED`` emitted) before the platform sends ``SIGKILL``.
+Registering the ``SIGNAL_INTERRUPTED`` re-enqueue handler
+(:ref:`recipe-interrupted-tasks`) is essential on these platforms. Read the
+storage location from the environment:
 
 .. code-block:: python
 
@@ -235,8 +244,9 @@ gracefully re-exec) the consumer:
 Production checklist
 --------------------
 
-* Stop signal is ``INT`` and the stop-timeout exceeds your longest task
-  (:ref:`deployment-signals`).
+* The supervisor stops huey with its graceful signal (``KillSignal=SIGINT``
+  and friends, or ``-g TERM``), and ``--shutdown-timeout`` is set a few
+  seconds under the supervisor's kill deadline (:ref:`deployment-signals`).
 * A ``SIGNAL_INTERRUPTED`` handler re-enqueues interrupted tasks, or your
   tasks are idempotent (:ref:`recipe-interrupted-tasks`).
 * Exactly one consumer enqueues periodic tasks and all others run with ``-n``

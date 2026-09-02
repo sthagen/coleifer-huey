@@ -126,6 +126,7 @@ Table of contents
    guide
    consumer
    deployment
+   monitoring
    imports
    shared_resources
    signals
