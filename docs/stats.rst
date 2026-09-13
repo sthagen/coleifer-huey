@@ -34,7 +34,8 @@ once, in a module the consumer imports:
     # Any peewee (or flask-peewee) Database. It need not be the huey storage,
     # and a networked database (Postgres/MySQL) lets a separate web process
     # read the same statistics.
-    stats_db = peewee.SqliteDatabase('/path/to/stats.db')
+    stats_db = peewee.SqliteDatabase('/path/to/stats.db', pragmas={
+        'journal_mode': 'wal'})
 
     stats = enable_stats(huey, stats_db)
 

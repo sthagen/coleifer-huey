@@ -3,6 +3,10 @@ Changelog
 
 ## master
 
+[View commits](https://github.com/coleifer/huey/compare/3.4.0...master)
+
+## 3.4.0
+
 * **Backwards-incompatible.** The django stats app writes to its own sqlite
   database by default (`huey-stats.db` in `settings.BASE_DIR`), instead of
   `DATABASES['default']`. To keep recording in your main Django database,
@@ -88,7 +92,7 @@ Stats:
   who could view the dashboard could also flush the queue.
 * Add `huey[stats]` extra which installs ol' peewee.
 
-[View commits](https://github.com/coleifer/huey/compare/3.3.4...master)
+[View commits](https://github.com/coleifer/huey/compare/3.3.4...3.4.0)
 
 ## 3.3.4
 

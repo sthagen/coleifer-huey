@@ -180,7 +180,10 @@ class Scheduler(BaseProcess):
         else:
             for task in task_list:
                 self._logger.debug('Enqueueing %s', task)
-                self.huey.enqueue(task)
+                try:
+                    self.huey.enqueue(task)
+                except Exception:
+                    self._logger.exception('Error enqueueing %s.', task)
 
         if self.periodic and self._next_periodic <= time.monotonic():
             # If the scheduler stalled (e.g. suspend/resume), skip past any
